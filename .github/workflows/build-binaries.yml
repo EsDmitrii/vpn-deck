@@ -19,17 +19,18 @@ jobs:
   build-binaries:
     name: Build AmneziaWG binaries for SteamOS (Steam Deck)
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/mrwaip/vpn-deck-builder:latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Build builder image from infra/Dockerfile
+        run: docker build -f infra/Dockerfile -t vpn-deck-builder:local .
+
       - name: Copy binaries from container
         run: |
           mkdir -p binaries
-          cp -a /binaries/. binaries/
+          docker run --rm -v "$PWD/binaries:/out" vpn-deck-builder:local sh -c "cp -a /binaries/. /out/"
 
       - name: Create binaries archive
         run: |
