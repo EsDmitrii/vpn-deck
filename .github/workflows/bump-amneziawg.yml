@@ -1,0 +1,68 @@
+name: Bump AmneziaWG
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  bump:
+    name: Check for new amneziawg-go / amneziawg-tools tags
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find latest upstream tags
+        id: latest
+        run: |
+          latest_tag() {
+            git ls-remote --tags --refs --sort=-v:refname "https://github.com/amnezia-vpn/$1.git" \
+              | sed 's|.*refs/tags/||' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$' \
+              | head -n1
+          }
+          echo "go=$(latest_tag amneziawg-go)" >> "$GITHUB_OUTPUT"
+          echo "tools=$(latest_tag amneziawg-tools)" >> "$GITHUB_OUTPUT"
+
+      - name: Update Dockerfile
+        id: update
+        run: |
+          go="${{ steps.latest.outputs.go }}"
+          tools="${{ steps.latest.outputs.tools }}"
+          [[ -n "$go" && -n "$tools" ]] || { echo "Failed to resolve upstream tags"; exit 1; }
+          sed -i -E \
+            -e "s|^ARG AMNEZIAWG_GO_REF=.*|ARG AMNEZIAWG_GO_REF=${go}|" \
+            -e "s|^ARG AMNEZIAWG_TOOLS_REF=.*|ARG AMNEZIAWG_TOOLS_REF=${tools}|" \
+            infra/Dockerfile
+          git diff --exit-code infra/Dockerfile && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        id: pr
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: bot/bump-amneziawg
+          commit-message: 'infra: bump amneziawg-go to ${{ steps.latest.outputs.go }}, amneziawg-tools to ${{ steps.latest.outputs.tools }}'
+          title: 'infra: bump AmneziaWG (go ${{ steps.latest.outputs.go }}, tools ${{ steps.latest.outputs.tools }})'
+          body: |
+            New upstream AmneziaWG tags:
+            - amneziawg-go: `${{ steps.latest.outputs.go }}`
+            - amneziawg-tools: `${{ steps.latest.outputs.tools }}`
+
+            Before merging, check the upstream changelogs and test on a Steam Deck with existing configs (AWG 1/2/3).
+          delete-branch: true
+
+      # PRs opened with GITHUB_TOKEN don't trigger pull_request workflows,
+      # so kick off the binaries build on the PR branch explicitly.
+      - name: Build binaries on PR branch
+        if: steps.pr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-binaries.yml --ref bot/bump-amneziawg
