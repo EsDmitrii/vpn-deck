@@ -13,6 +13,7 @@ install:
 test:
     PYTHONPATH=py_modules python3 test_unit.py
     PYTHONPATH=py_modules python3 test_simple.py
+    python3 test_vpn_uri.py
 
 # Run smoke tests inside a Steam Deck OS container (holo-base)
 test-smoke:

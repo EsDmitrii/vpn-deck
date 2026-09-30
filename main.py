@@ -4,7 +4,10 @@ import time
 import traceback as _traceback
 from typing import Dict, List, Optional
 
-from vpn_deck import BinaryManager, ConfigManager, Diagnostics, ServiceManager
+from vpn_deck import (
+    BinaryManager, ConfigManager, Diagnostics, ServiceManager,
+    VpnUriError, decode_vpn_uri, is_vpn_uri, looks_like_wg_config,
+)
 
 import decky
 
@@ -201,12 +204,27 @@ class Plugin:
         decky.logger.info(f"import_vpn_config: name={name}, path={path}")
         if not os.path.isfile(path):
             return {"success": False, "error": "Файл не найден"}
+        if os.path.getsize(path) > 1024 * 1024:
+            return {"success": False, "error": "Файл больше 1 МБ, это не похоже на конфиг"}
 
-        with open(path, "r") as f:
-            content = f.read()
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            return {"success": False, "error": "Файл не текстовый"}
 
         if not content.strip():
             return {"success": False, "error": "Файл пустой"}
+
+        if is_vpn_uri(content):
+            try:
+                content = decode_vpn_uri(content)
+            except VpnUriError as e:
+                return {"success": False, "error": f"Не удалось разобрать ссылку vpn://: {e}"}
+            decky.logger.info("import_vpn_config: decoded vpn:// link")
+
+        if not looks_like_wg_config(content):
+            return {"success": False, "error": "Файл не похож на конфиг AmneziaWG/WireGuard или ссылку vpn://"}
 
         result = self.config_manager.write_config(name, content)
         return {"success": result["success"], "error": result["error"] or ""}

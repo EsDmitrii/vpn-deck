@@ -4,8 +4,15 @@ Smoke test for Plugin class — verifies all public RPC methods without real bin
 """
 
 import asyncio
+import base64
+import importlib.util
+import json
 import os
+import shutil
+import struct
 import sys
+import tempfile
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,7 +58,11 @@ class _MockBinaryManager:
 
 class _MockConfigManager:
     def __init__(self):
-        pass
+        self.written = []
+
+    def write_config(self, name, content):
+        self.written.append((name, content))
+        return {"success": True, "config_name": name, "interface_name": f"awg-{name}", "error": None}
 
     async def list_all_configs(self):
         return [{"name": "test", "interface": "awg-test", "managed_by": "vpn-deck"}]
@@ -94,10 +105,29 @@ class _MockServiceManager:
         return {"success": True, "stopped": [], "error": None}
 
 
+class _MockDiagnostics:
+    def check(self, targets=None):
+        return []
+
+
+_spec = importlib.util.spec_from_file_location(
+    "vpn_deck_vpn_uri",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "py_modules", "vpn_deck", "vpn_uri.py"),
+)
+_vpn_uri = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_vpn_uri)
+
+
 class _MockVpnDeck:
     BinaryManager = _MockBinaryManager
     ConfigManager = _MockConfigManager
+    Diagnostics = _MockDiagnostics
     ServiceManager = _MockServiceManager
+    # The mock is used as an instance, so plain functions would turn into bound methods.
+    VpnUriError = _vpn_uri.VpnUriError
+    decode_vpn_uri = staticmethod(_vpn_uri.decode_vpn_uri)
+    is_vpn_uri = staticmethod(_vpn_uri.is_vpn_uri)
+    looks_like_wg_config = staticmethod(_vpn_uri.looks_like_wg_config)
 
 
 sys.modules["vpn_deck"] = _MockVpnDeck()
@@ -154,6 +184,62 @@ def assert_success_false(result, name):
         ok(name)
     else:
         fail(name, f"expected {{success: False, error: ...}}, got {result!r}")
+
+
+NATIVE_CONFIG = """[Interface]
+Address = 10.8.1.2/32
+DNS = 1.1.1.1, 1.0.0.1
+PrivateKey = YAnz5TF+lXXJte14tji3zlMNftft3UL32bbjzVEwPBs=
+Jc = 4
+
+[Peer]
+PublicKey = HIgo9xNzJMWLKASShiTqIybxZ0U3wGLiUeJ1PKf8ykw=
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.com:46907
+"""
+
+
+def make_vpn_link(config_template, dns1, dns2):
+    last_config = json.dumps({"config": config_template})
+    data = {
+        "containers": [{"container": "amnezia-awg", "awg": {"last_config": last_config}}],
+        "defaultContainer": "amnezia-awg",
+        "dns1": dns1,
+        "dns2": dns2,
+    }
+    raw = json.dumps(data).encode()
+    raw = struct.pack(">I", len(raw)) + zlib.compress(raw)
+    return "vpn://" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+async def import_file(plugin, tmpdir, filename, data: bytes):
+    path = os.path.join(tmpdir, filename)
+    with open(path, "wb") as f:
+        f.write(data)
+    plugin.config_manager.written.clear()
+    result = await plugin.import_vpn_config("imported", path=path)
+    return result, list(plugin.config_manager.written)
+
+
+def assert_imported(result, written, expected_content, name):
+    if not (isinstance(result, dict) and result.get("success") is True):
+        fail(name, f"expected success, got {result!r}")
+    elif [n for n, _ in written] != ["imported"]:
+        fail(name, f"expected one write_config('imported', ...), got {written!r}")
+    elif written[0][1] != expected_content:
+        fail(name, f"unexpected written content: {written[0][1]!r}")
+    else:
+        ok(name)
+
+
+def assert_rejected(result, written, error_prefix, name):
+    if not (isinstance(result, dict) and result.get("success") is False
+            and str(result.get("error", "")).startswith(error_prefix)):
+        fail(name, f"expected error starting with {error_prefix!r}, got {result!r}")
+    elif written:
+        fail(name, f"nothing must be written on error, got {written!r}")
+    else:
+        ok(name)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +302,52 @@ async def run_tests():
         ok("get_vpn_config('test') no exception")
     except Exception as e:
         fail("get_vpn_config('test')", str(e))
+
+    print("\n[diagnostics]")
+    assert_list(await plugin.diagnose_connectivity(), "diagnose_connectivity()")
+
+    print("\n[import_vpn_config: file formats]")
+    tmpdir = tempfile.mkdtemp(prefix="vpn-deck-smoke-")
+    try:
+        r, w = await import_file(plugin, tmpdir, "native.conf", NATIVE_CONFIG.encode())
+        assert_imported(r, w, NATIVE_CONFIG, "native .conf imported as is")
+
+        r, w = await import_file(plugin, tmpdir, "bom.conf", b"\xef\xbb\xbf" + NATIVE_CONFIG.encode())
+        assert_imported(r, w, NATIVE_CONFIG, ".conf with UTF-8 BOM imported without the BOM")
+
+        template = NATIVE_CONFIG.replace("DNS = 1.1.1.1, 1.0.0.1", "DNS = $PRIMARY_DNS, $SECONDARY_DNS")
+        expected = NATIVE_CONFIG.replace("DNS = 1.1.1.1, 1.0.0.1", "DNS = 172.29.172.254, 9.9.9.9")
+        link = make_vpn_link(template, "172.29.172.254", "9.9.9.9")
+        r, w = await import_file(plugin, tmpdir, "link.txt", (link + "\n").encode())
+        assert_imported(r, w, expected, "vpn:// link in .txt written as decoded config with DNS")
+
+        r, w = await import_file(plugin, tmpdir, "link-win.txt", ("\ufeff" + link + "\r\n").encode())
+        assert_imported(r, w, expected, "vpn:// link with BOM and CRLF written as decoded config")
+
+        r, w = await import_file(plugin, tmpdir, "broken.txt", b"vpn://this-is-not-base64!!!\n")
+        assert_rejected(r, w, "Не удалось разобрать ссылку vpn://:", "broken vpn:// link rejected, nothing written")
+
+        no_peer_link = make_vpn_link(NATIVE_CONFIG.split("[Peer]")[0], "1.1.1.1", "1.0.0.1")
+        r, w = await import_file(plugin, tmpdir, "no-peer.txt", no_peer_link.encode())
+        assert_rejected(r, w, "Не удалось разобрать ссылку vpn://:", "vpn:// link without [Peer] rejected, nothing written")
+
+        r, w = await import_file(plugin, tmpdir, "notes.txt", b"just some notes\nnothing to see here\n")
+        assert_rejected(r, w, "Файл не похож на конфиг", "random text rejected, nothing written")
+
+        r, w = await import_file(plugin, tmpdir, "image.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xfe\xfd")
+        assert_rejected(r, w, "Файл не текстовый", "binary file rejected, nothing written")
+
+        r, w = await import_file(plugin, tmpdir, "huge.conf", NATIVE_CONFIG.encode() + b"#" * (1024 * 1024))
+        assert_rejected(r, w, "Файл больше 1 МБ", "file over 1 MB rejected, nothing written")
+
+        r, w = await import_file(plugin, tmpdir, "empty.conf", b" \n\n")
+        assert_rejected(r, w, "Файл пустой", "empty file rejected, nothing written")
+
+        plugin.config_manager.written.clear()
+        r = await plugin.import_vpn_config("imported", path=os.path.join(tmpdir, "missing.conf"))
+        assert_rejected(r, plugin.config_manager.written, "Файл не найден", "missing file rejected, nothing written")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     print("\n[_rpc decorator: exception → dict]")
     # Force an exception by passing a bad arg that gets past coercion
