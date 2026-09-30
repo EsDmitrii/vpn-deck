@@ -20,6 +20,7 @@ This plugin was developed purely out of enthusiasm, in spare time. If you encoun
 - Multiple configs — store and switch between multiple VPN connections
 - Enable/disable each config with a single toggle
 - Real-time connection status
+- The tunnel survives sleep and network changes: the plugin re-pins the route to the VPN server through the new network and restarts a stuck tunnel
 - Error history with the ability to clear it
 
 The plugin requires root access to work with `awg-quick` and network interfaces.

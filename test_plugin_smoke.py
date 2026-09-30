@@ -10,8 +10,10 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
+import threading
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,6 +37,9 @@ class _MockDecky:
 
 
 sys.modules["decky"] = _MockDecky()
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "py_modules"))
+from vpn_deck import network_watch as _network_watch  # noqa: E402  real watcher, managers are mocked below
 
 # ---------------------------------------------------------------------------
 # Mock: vpn_deck managers
@@ -87,7 +92,8 @@ class _MockConfigManager:
 
 class _MockServiceManager:
     def __init__(self, bm):
-        pass
+        self.binary_manager = bm
+        self.lock = threading.RLock()
 
     def start_interface(self, interface):
         return {"success": True, "error": None}
@@ -122,6 +128,7 @@ class _MockVpnDeck:
     BinaryManager = _MockBinaryManager
     ConfigManager = _MockConfigManager
     Diagnostics = _MockDiagnostics
+    NetworkWatch = _network_watch.NetworkWatch
     ServiceManager = _MockServiceManager
     # The mock is used as an instance, so plain functions would turn into bound methods.
     VpnUriError = _vpn_uri.VpnUriError
@@ -357,6 +364,36 @@ async def run_tests():
     r = await plugin.vpn_start_config("anyname")
     plugin.config_manager.get_interface_name = orig
     assert_success_false(r, "_rpc catches exception → {success: False, error: ...}")
+
+    print("\n[network watch lifecycle]")
+    def no_subprocess(*args, **kwargs):
+        raise AssertionError(f"subprocess.run called: {args!r}")
+
+    logged, ticks = [], []
+    real_run, real_error, interval = subprocess.run, _MockLogger.error, _network_watch.CHECK_INTERVAL_SEC
+    subprocess.run = no_subprocess
+    _MockLogger.error = lambda self, msg: logged.append(msg)
+    _network_watch.CHECK_INTERVAL_SEC = 0.01
+    try:
+        p = Plugin()
+        p.binary_manager.get_binary_path = lambda name: ticks.append(name)
+        await p._main()
+        task = p.network_watch._task
+        await p._main()
+        started_once = task is not None and p.network_watch._task is task
+        await asyncio.sleep(0.05)
+        running = task is not None and not task.done()
+        await p._unload()
+        stopped = task is not None and task.cancelled() and p.network_watch._task is None
+    finally:
+        subprocess.run, _MockLogger.error = real_run, real_error
+        _network_watch.CHECK_INTERVAL_SEC = interval
+    watch_errors = [m for m in logged if "Network watch" in m or "AssertionError" in m]
+    if started_once and running and ticks and stopped and not watch_errors:
+        ok("_main starts one watcher, it ticks, _unload stops it")
+    else:
+        fail("network watch lifecycle",
+             f"started_once={started_once} running={running} ticks={len(ticks)} stopped={stopped} errors={watch_errors}")
 
 
 async def main():
