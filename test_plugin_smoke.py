@@ -33,6 +33,7 @@ class _MockDecky:
     logger = _MockLogger()
     DECKY_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
     DECKY_PLUGIN_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    DECKY_PLUGIN_SETTINGS_DIR = tempfile.mkdtemp(prefix="vpn-deck-smoke-settings-")
     plugin_home = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test_home")
 
 
@@ -40,13 +41,14 @@ sys.modules["decky"] = _MockDecky()
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "py_modules"))
 from vpn_deck import network_watch as _network_watch  # noqa: E402  real watcher, managers are mocked below
+from vpn_deck import settings as _settings, status as _status  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Mock: vpn_deck managers
 # ---------------------------------------------------------------------------
 
 class _MockBinaryManager:
-    binary_names = ["amneziawg-go", "awg", "awg-quick"]
+    binary_names = ["amneziawg-go", "awg", "awg-quick", "sing-box"]
 
     def get_binaries_info(self):
         return {name: {"path": None, "version": None} for name in self.binary_names}
@@ -62,12 +64,29 @@ class _MockBinaryManager:
 
 
 class _MockConfigManager:
+    config_prefix = "awg-"
+
     def __init__(self):
         self.written = []
+        self.types = {}
 
     def write_config(self, name, content):
         self.written.append((name, content))
         return {"success": True, "config_name": name, "interface_name": f"awg-{name}", "error": None}
+
+    def write_singbox_config(self, name, config):
+        self.written.append((name, config))
+        return {"success": True, "config_name": name, "interface_name": f"awg-{name}", "error": None}
+
+    def write_vless_link(self, name, link):
+        self.written.append((name, link))
+        return {"success": True, "config_name": name, "interface_name": f"awg-{name}", "error": None}
+
+    def config_type(self, name):
+        return self.types.get(name)
+
+    def config_path(self, name):
+        return f"/configs/{name}.json"
 
     async def list_all_configs(self):
         return [{"name": "test", "interface": "awg-test", "managed_by": "vpn-deck"}]
@@ -94,12 +113,23 @@ class _MockServiceManager:
     def __init__(self, bm):
         self.binary_manager = bm
         self.lock = threading.RLock()
+        self.active = []
+        self.default_route = "default via 192.168.31.1 dev wlan0"
 
     def start_interface(self, interface):
+        if interface not in self.active:
+            self.active.append(interface)
         return {"success": True, "error": None}
 
     def stop_interface(self, interface):
+        if interface in self.active:
+            self.active.remove(interface)
         return {"success": True, "error": None}
+
+    def run_command(self, cmd, timeout=10):
+        if cmd == ["ip", "route", "show", "default"]:
+            return 0, self.default_route, ""
+        return 0, "", ""
 
     def get_status(self, interface):
         return {"status": "inactive", "error": None}
@@ -107,8 +137,41 @@ class _MockServiceManager:
     def get_all_statuses(self):
         return []
 
+    def list_interfaces(self):
+        return list(self.active)
+
     def stop_all_interfaces(self, only_managed=False):
-        return {"success": True, "stopped": [], "error": None}
+        return {"stopped": [], "failed": [], "total": 0}
+
+
+class _MockSingBoxManager:
+    def __init__(self, bm):
+        self.check_error = None
+        self.checked = []
+        self.active = []
+        self.calls = []
+        self.fail_start = set()
+
+    def check(self, config_text):
+        self.checked.append(json.loads(config_text))
+        return self.check_error
+
+    def running(self):
+        return list(self.active)
+
+    def start(self, interface, config_path):
+        self.calls.append(("start", interface, config_path))
+        if interface in self.fail_start:
+            return {"success": False, "error": "sing-box завершился при запуске: FATAL boom"}
+        if interface not in self.active:
+            self.active.append(interface)
+        return {"success": True, "error": None}
+
+    def stop(self, interface):
+        self.calls.append(("stop", interface))
+        if interface in self.active:
+            self.active.remove(interface)
+        return {"success": True, "error": None}
 
 
 class _MockDiagnostics:
@@ -123,6 +186,13 @@ _spec = importlib.util.spec_from_file_location(
 _vpn_uri = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_vpn_uri)
 
+_spec = importlib.util.spec_from_file_location(
+    "vpn_deck_singbox",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "py_modules", "vpn_deck", "singbox.py"),
+)
+_singbox = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_singbox)
+
 
 class _MockVpnDeck:
     BinaryManager = _MockBinaryManager
@@ -130,7 +200,15 @@ class _MockVpnDeck:
     Diagnostics = _MockDiagnostics
     NetworkWatch = _network_watch.NetworkWatch
     ServiceManager = _MockServiceManager
+    SingBoxManager = _MockSingBoxManager
+    Settings = _settings.Settings
+    ConnectionStatus = _status.ConnectionStatus
     # The mock is used as an instance, so plain functions would turn into bound methods.
+    SingBoxError = _singbox.SingBoxError
+    is_vless_uri = staticmethod(_singbox.is_vless_uri)
+    looks_like_json = staticmethod(_singbox.looks_like_json)
+    singbox_config = staticmethod(_singbox.singbox_config)
+    vless_link = staticmethod(_singbox.vless_link)
     VpnUriError = _vpn_uri.VpnUriError
     decode_vpn_uri = staticmethod(_vpn_uri.decode_vpn_uri)
     is_vpn_uri = staticmethod(_vpn_uri.is_vpn_uri)
@@ -143,6 +221,7 @@ sys.modules["vpn_deck"] = _MockVpnDeck()
 # Import Plugin (after mocks are in place)
 # ---------------------------------------------------------------------------
 
+import main as _main_module  # noqa: E402
 from main import Plugin  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -355,6 +434,180 @@ async def run_tests():
         assert_rejected(r, plugin.config_manager.written, "Файл не найден", "missing file rejected, nothing written")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print("\n[import_vpn_config: sing-box]")
+    tmpdir = tempfile.mkdtemp(prefix="vpn-deck-smoke-")
+    link = ("vless://3f1c2a9e-8b7d-4c6e-9a1b-2d3e4f5a6b7c@cdn.example.com:443?encryption=none"
+            "&security=tls&sni=cdn.example.com&fp=chrome&type=ws&host=cdn.example.com&path=%2Fws#deck")
+    user_json = json.dumps({"inbounds": [{"type": "tun", "interface_name": "tun0"}],
+                            "outbounds": [{"type": "trojan", "tag": "t"}]})
+    try:
+        r, w = await import_file(plugin, tmpdir, "deck.txt", ("\ufeff" + link + "\r\n").encode())
+        checked = plugin.singbox.checked[-1]
+        if (r.get("success") and w == [("imported", link)]
+                and checked["inbounds"][0]["interface_name"] == "awg-imported"
+                and checked["outbounds"][0]["type"] == "vless"):
+            ok("vless:// link checked as a sing-box TUN config and stored as the link")
+        else:
+            fail("vless:// link import", f"result={r!r} written={w!r}")
+
+        r, w = await import_file(plugin, tmpdir, "sb.json", user_json.encode())
+        if r.get("success") and len(w) == 1 and w[0][1]["inbounds"][0]["interface_name"] == "awg-imported":
+            ok("sing-box JSON with a tun inbound written with our interface name")
+        else:
+            fail("sing-box JSON import", f"result={r!r} written={w!r}")
+
+        r, w = await import_file(plugin, tmpdir, "socks.json", b'{"inbounds": [{"type": "socks"}], "outbounds": []}')
+        assert_rejected(r, w, "Не удалось разобрать:", "sing-box JSON without tun rejected, nothing written")
+
+        r, w = await import_file(plugin, tmpdir, "xhttp.txt", link.replace("type=ws", "type=xhttp").encode())
+        assert_rejected(r, w, "Не удалось разобрать:", "vless:// with an unsupported transport rejected")
+
+        plugin.singbox.check_error = "decode config at stdin: unknown field"
+        r, w = await import_file(plugin, tmpdir, "deck.txt", link.encode())
+        assert_rejected(r, w, "sing-box не принял конфиг:", "config refused by sing-box check, nothing written")
+        plugin.singbox.check_error = None
+
+        plugin.config_manager.types["imported"] = "awg"
+        r, w = await import_file(plugin, tmpdir, "deck.txt", link.encode())
+        assert_rejected(r, w, "Конфиг AmneziaWG с таким именем", "vless:// over an existing AWG name rejected")
+        plugin.config_manager.types["imported"] = "sing-box"
+        r, w = await import_file(plugin, tmpdir, "native.conf", NATIVE_CONFIG.encode())
+        assert_rejected(r, w, "Конфиг sing-box с таким именем", ".conf over an existing sing-box name rejected")
+        plugin.config_manager.types.clear()
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    print("\n[sing-box start / stop routing]")
+    plugin.config_manager.types["deck"] = "vless"
+    plugin.singbox.calls.clear()
+    r = await plugin.vpn_start_config("deck")
+    if r.get("success") and plugin.singbox.calls == [("start", "awg-deck", "/configs/deck.json")]:
+        ok("sing-box config started through SingBoxManager")
+    else:
+        fail("sing-box start", f"result={r!r} calls={plugin.singbox.calls!r}")
+
+    sm, sb, settings = plugin.service_manager, plugin.singbox, plugin.settings
+    sm.active = []
+    r = await plugin.vpn_start_config("home")
+    if (r.get("success") and r.get("switched_from") == ["deck"] and sb.active == [] and sm.active == ["awg-home"]
+            and settings.get("last_active") == "home"):
+        ok("AWG start switches the running sing-box tunnel off")
+    else:
+        fail("switch sing-box -> AWG", f"result={r!r} sb={sb.active} awg={sm.active}")
+
+    r = await plugin.vpn_start_config("deck")
+    if r.get("success") and r.get("switched_from") == ["home"] and sm.active == [] and sb.active == ["awg-deck"]:
+        ok("sing-box start switches the running AWG tunnel off")
+    else:
+        fail("switch AWG -> sing-box", f"result={r!r} sb={sb.active} awg={sm.active}")
+
+    plugin.config_manager.types["deck2"] = "vless"
+    sm.active = ["wg0"]
+    r = await plugin.vpn_start_config("deck2")
+    if not r.get("success") and "wg0" in r.get("error", "") and sb.active == ["awg-deck"] and sm.active == ["wg0"]:
+        ok("a tunnel the plugin did not start blocks sing-box and is left alone")
+    else:
+        fail("foreign tunnel", f"result={r!r} sb={sb.active} awg={sm.active}")
+    sm.active = []
+
+    sb.fail_start = {"awg-deck2"}
+    r = await plugin.vpn_start_config("deck2")
+    if (not r.get("success") and "Вернул deck" in r.get("error", "") and sb.active == ["awg-deck"]
+            and r.get("switched_from") == [] and settings.get("last_active") == "deck"):
+        ok("a failed switch brings the previous tunnel back")
+    else:
+        fail("failed switch", f"result={r!r} sb={sb.active} last={settings.get('last_active')}")
+    sb.fail_start = set()
+
+    plugin.status._fetch_exit = lambda: {"ip": "203.0.113.1", "country": "NL"}
+    status = await plugin.connection_status()
+    if isinstance(status, list) and [(t["name"], t["interface"], t["type"]) for t in status] == [("deck", "awg-deck", "sing-box")]:
+        ok("connection_status() lists the running tunnel")
+    else:
+        fail("connection_status()", f"got {status!r}")
+
+    r1 = await plugin.set_restore_on_boot({"enabled": False})
+    r2 = await plugin.get_settings()
+    await plugin.set_restore_on_boot(True)
+    if r1 == {"restore_on_boot": False} and r2 == {"restore_on_boot": False} and settings.get("restore_on_boot") is True:
+        ok("restore_on_boot setting round-trips")
+    else:
+        fail("restore_on_boot setting", f"{r1!r} {r2!r}")
+    configs = await plugin.list_configs_with_status()
+    r = await plugin.vpn_stop_config("deck")
+    stop_all = await plugin.vpn_stop_all()
+    if r.get("success") and ("stop", "awg-deck") in plugin.singbox.calls and settings.get("last_active") is None:
+        ok("sing-box config stopped through SingBoxManager, nothing to restore after reboot")
+    else:
+        fail("sing-box stop", f"stop={r!r} calls={plugin.singbox.calls!r} last={settings.get('last_active')}")
+    sb.active = ["awg-deck"]
+    settings.set("last_active", "deck")
+    stop_all = await plugin.vpn_stop_all()
+    if "awg-deck" in stop_all.get("stopped", []) and settings.get("last_active") is None:
+        ok("stop_all includes sing-box and clears the config to restore")
+    else:
+        fail("stop_all", f"{stop_all!r}")
+    plugin.singbox.active = []
+    plugin.config_manager.types.clear()
+    assert_list(configs, "list_configs_with_status() with sing-box running")
+
+    print("\n[restore the last config after start]")
+    retry, window = _main_module.RESTORE_RETRY_SEC, _main_module.RESTORE_WINDOW_SEC
+    _main_module.RESTORE_RETRY_SEC = 0.01
+    try:
+        p = Plugin()
+        p.config_manager.types["deck"] = "vless"
+        p.settings.set("last_active", "deck")
+        p.service_manager.default_route = ""
+        await p._main()
+        await asyncio.sleep(0.1)
+        offline_waits = p.singbox.active == []
+        p.service_manager.default_route = "default via 172.20.10.1 dev wlan0"
+        await asyncio.sleep(0.1)
+        restored = p.singbox.active == ["awg-deck"] and p._restore_task.done()
+        await p._unload()
+        if offline_waits and restored:
+            ok("waits for the network, then brings the last config back")
+        else:
+            fail("restore after start", f"offline_waits={offline_waits} restored={restored} sb={p.singbox.active}")
+
+        p = Plugin()
+        p.config_manager.types["deck"] = "vless"
+        p.settings.set("last_active", "deck")
+        p.service_manager.active = ["awg-home"]
+        await p._main()
+        await asyncio.sleep(0.05)
+        skipped_when_up = p.singbox.active == [] and p._restore_task.done()
+        await p._unload()
+        p.settings.set("restore_on_boot", False)
+        p = Plugin()
+        p.config_manager.types["deck"] = "vless"
+        await p._main()
+        await asyncio.sleep(0.05)
+        skipped_when_off = p.singbox.active == []
+        await p._unload()
+        p.settings.set("restore_on_boot", True)
+        if skipped_when_up and skipped_when_off:
+            ok("no restore when a tunnel is already up or the setting is off")
+        else:
+            fail("restore skips", f"when_up={skipped_when_up} when_off={skipped_when_off}")
+
+        _main_module.RESTORE_WINDOW_SEC = 0.05
+        p = Plugin()
+        p.config_manager.types["deck"] = "vless"
+        p.settings.set("last_active", "deck")
+        p.singbox.fail_start = {"awg-deck"}
+        await p._main()
+        await asyncio.sleep(0.2)
+        reported = [e for e in p.errors if e["operation"] == "restore"]
+        await p._unload()
+        if len(reported) == 1 and "FATAL boom" in reported[0]["message"]:
+            ok("a restore that keeps failing is reported once")
+        else:
+            fail("restore failure", f"errors={p.errors!r}")
+    finally:
+        _main_module.RESTORE_RETRY_SEC, _main_module.RESTORE_WINDOW_SEC = retry, window
 
     print("\n[_rpc decorator: exception → dict]")
     # Force an exception by passing a bad arg that gets past coercion
