@@ -2,6 +2,7 @@ import {
   ButtonItem,
   DialogBody,
   DialogButton,
+  DialogButtonPrimary,
   DialogFooter,
   DialogHeader,
   DropdownItem,
@@ -160,6 +161,39 @@ const TEXT = { fontSize: "13px" } as const;
 const HINT = { marginTop: "6px", fontSize: "12px", color: "#8b929a" } as const;
 const COLOR_ERROR = "#f87171";
 const COLOR_WARNING = "#fbbf24";
+
+/**
+ * Modal footer with buttons in a row, primary action first (as in Steam's own
+ * dialogs). DialogFooter alone stacks full-width buttons with no gap.
+ */
+function ModalActions({
+  primary,
+  onPrimary,
+  primaryDisabled,
+  onCancel,
+  cancelLabel = "Отмена",
+}: {
+  primary?: string;
+  onPrimary?: () => void;
+  primaryDisabled?: boolean;
+  onCancel?: () => void;
+  cancelLabel?: string;
+}) {
+  return (
+    <DialogFooter>
+      <div style={{ display: "flex", gap: "8px" }}>
+        {primary && (
+          <DialogButtonPrimary style={{ flex: 1 }} onClick={onPrimary} disabled={primaryDisabled}>
+            {primary}
+          </DialogButtonPrimary>
+        )}
+        <DialogButton style={{ flex: 1 }} onClick={onCancel}>
+          {cancelLabel}
+        </DialogButton>
+      </div>
+    </DialogFooter>
+  );
+}
 
 const RECOMMENDED_AWG_MTU = 1280; // keep in sync with defaults.RECOMMENDED_AWG_MTU
 const IMPORT_EXTENSIONS = ["conf", "txt", "vpn", "json"];
@@ -427,12 +461,12 @@ function ImportConfigModal({
           )}
         </div>
       </DialogBody>
-      <DialogFooter>
-        <DialogButton onClick={handleImport} disabled={!canImport}>
-          {loading ? "Импорт..." : "Импортировать"}
-        </DialogButton>
-        <DialogButton onClick={closeModal}>Отмена</DialogButton>
-      </DialogFooter>
+      <ModalActions
+        primary={loading ? "Импорт…" : "Импортировать"}
+        onPrimary={handleImport}
+        primaryDisabled={!canImport}
+        onCancel={closeModal}
+      />
     </ModalRoot>
   );
 }
@@ -552,12 +586,12 @@ function DeleteConfigModal({
           {active && <div style={TEXT}>Этот конфиг сейчас включён, VPN отключится.</div>}
         </div>
       </DialogBody>
-      <DialogFooter>
-        <DialogButton onClick={handleDelete} disabled={loading || !configName}>
-          {loading ? "Удаление…" : "Удалить"}
-        </DialogButton>
-        <DialogButton onClick={closeModal}>Отмена</DialogButton>
-      </DialogFooter>
+      <ModalActions
+        primary={loading ? "Удаление…" : "Удалить"}
+        onPrimary={handleDelete}
+        primaryDisabled={loading || !configName}
+        onCancel={closeModal}
+      />
     </ModalRoot>
   );
 }
@@ -618,9 +652,7 @@ function ServerPickerModal({
           </div>
         )}
       </DialogBody>
-      <DialogFooter>
-        <DialogButton onClick={closeModal}>Закрыть</DialogButton>
-      </DialogFooter>
+      <ModalActions onCancel={closeModal} cancelLabel="Закрыть" />
     </ModalRoot>
   );
 }
