@@ -15,14 +15,14 @@ from .service_manager import ServiceManager
 from .settings import USER_EDITABLE, Settings
 from .singbox_manager import SingBoxManager
 from .status import StatusProbe
-from .subscription import SubscriptionConfig, curl_fetcher
+from .subscription import SubscriptionConfig, curl_fetcher, parse_subscription
 from .tunnels import AwgBackend, SingBoxBackend, TunnelBackend, TunnelController
 
 __all__ = [
     "AwgBackend", "BinaryManager", "CommandRunner", "ConfigImportError", "ConfigKind",
     "ConfigManager", "ConnectionStatus", "Diagnostics", "ImportPlan", "Json", "NetworkWatcher",
     "OpResult", "ServiceManager", "Settings", "SingBoxBackend", "SingBoxManager",
-    "StatusProbe", "StoredConfig", "SubscriptionConfig", "curl_fetcher", "SubprocessRunner", "TunnelBackend", "TunnelController",
+    "StatusProbe", "StoredConfig", "SubscriptionConfig", "curl_fetcher", "parse_subscription", "SubprocessRunner", "TunnelBackend", "TunnelController",
     "TunnelError", "USER_EDITABLE", "VpnDeckError", "is_online", "plan_import",
     "read_import_file", "read_routes", "restore_last_active", "to_rpc",
 ]

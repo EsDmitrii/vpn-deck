@@ -42,6 +42,7 @@ interface ConfigInfo {
   interface: string;
   active: boolean;
   managed_by: string;
+  server: string | null; // subscription: picked server
 }
 
 interface ExitInfo {
@@ -106,6 +107,10 @@ const inspectImport = callable<[string], ImportInspection>("inspect_import");
 const importVpnConfig = callable<[string, string, number | null, string | null], ImportResult>(
   "import_vpn_config",
 );
+const getSubscriptionServers = callable<[string], RpcResult & { servers?: string[] }>(
+  "get_subscription_servers",
+);
+const setSubscriptionServer = callable<[string, string], RpcResult>("set_subscription_server");
 const getSettings = callable<[], PluginSettings>("get_settings");
 const setSetting = callable<[string, PluginSettings[keyof PluginSettings]], RpcResult>("set_setting");
 const getErrors = callable<[], VPNError[]>("get_errors");
@@ -147,6 +152,12 @@ const diagnoseConnectivity = callable<[], DiagnosticsProbe[]>("diagnose_connecti
 // Валидация имени конфига: как в awg-quick и config_manager (интерфейс = vd-<name>, макс. 15 символов)
 const CONFIG_NAME_MAX_LEN = 12; // 3 (префикс "vd-") + 12 = 15
 const CONFIG_NAME_REGEX = /^[a-zA-Z0-9_=+.-]+$/;
+
+const STACK = { display: "flex", flexDirection: "column", gap: "12px" } as const;
+const TEXT = { fontSize: "13px" } as const;
+const HINT = { marginTop: "6px", fontSize: "12px", color: "#8b929a" } as const;
+const COLOR_ERROR = "#f87171";
+const COLOR_WARNING = "#fbbf24";
 
 const RECOMMENDED_AWG_MTU = 1280; // keep in sync with defaults.RECOMMENDED_AWG_MTU
 const IMPORT_EXTENSIONS = ["conf", "txt", "vpn", "json"];
@@ -276,58 +287,62 @@ function ImportConfigModal({
     <ModalRoot onCancel={closeModal} closeModal={closeModal}>
       <DialogHeader>Импорт конфига</DialogHeader>
       <DialogBody>
-        <DialogButton onClick={handlePickFile} disabled={loading}>
-          {filePath ? "Выбрать другой файл" : "Выбрать файл"}
-        </DialogButton>
-        <div style={{ marginTop: "6px", fontSize: "12px", color: "#8b929a" }}>
-          .conf AmneziaWG, ссылка vpn:// или vless:// или URL подписки в .txt, JSON sing-box
-        </div>
-        {inspection && !inspection.success && (
-          <div style={{ marginTop: "12px", fontSize: "13px", color: "#f87171" }}>
-            {fileName}: {inspection.error}
-          </div>
-        )}
-        {inspection?.success && (
-          <>
-            <div style={{ marginTop: "12px", fontSize: "13px" }}>
-              {fileName} — {inspection.label}
+        <div style={STACK}>
+          <div>
+            <DialogButton onClick={handlePickFile} disabled={loading}>
+              {filePath ? "Выбрать другой файл" : "Выбрать файл"}
+            </DialogButton>
+            <div style={HINT}>
+              .conf AmneziaWG, ссылка vpn:// или vless:// или URL подписки в .txt, JSON sing-box
             </div>
-            <div style={{ marginTop: "12px" }}>
+          </div>
+          {inspection && !inspection.success && (
+            <div style={{ ...TEXT, color: COLOR_ERROR }}>
+              {fileName}: {inspection.error}
+            </div>
+          )}
+          {inspection?.success && (
+            <>
+              <div style={TEXT}>
+                {fileName} — {inspection.label}
+              </div>
               <TextField
                 label="Имя конфига"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 description="до 12 символов: a-z, 0-9, _ = + . -"
               />
-            </div>
-            {(inspection.servers?.length ?? 0) > 0 && (
-              <DropdownItem
-                label="Сервер"
-                description="Ссылка обновляется из подписки при каждом подключении"
-                rgOptions={(inspection.servers ?? []).map((s) => ({ data: s, label: s }))}
-                selectedOption={server}
-                onChange={(opt) => setServer(opt.data)}
-              />
-            )}
-            {inspection.mtu_warning && (
-              <ToggleField
-                label={`Установить MTU ${RECOMMENDED_AWG_MTU}`}
-                description={
-                  inspection.mtu
-                    ? `Сейчас MTU ${inspection.mtu}: для AWG это часто слишком много, соединение может не работать`
-                    : "MTU не задан, будет ~1420: для AWG это часто слишком много, соединение может не работать"
-                }
-                checked={fixMtu}
-                onChange={setFixMtu}
-              />
-            )}
-            {(inspection.warnings ?? []).map((w) => (
-              <div key={w} style={{ marginTop: "8px", fontSize: "12px", color: "#fbbf24" }}>
-                ⚠ {w}
-              </div>
-            ))}
-          </>
-        )}
+              {(inspection.servers?.length ?? 0) > 0 && (
+                <DropdownItem
+                  label="Сервер"
+                  description="Потом можно сменить в списке конфигов"
+                  rgOptions={(inspection.servers ?? []).map((s) => ({ data: s, label: s }))}
+                  selectedOption={server}
+                  onChange={(opt) => setServer(opt.data)}
+                  bottomSeparator="none"
+                />
+              )}
+              {inspection.mtu_warning && (
+                <ToggleField
+                  label={`Установить MTU ${RECOMMENDED_AWG_MTU}`}
+                  description={
+                    inspection.mtu
+                      ? `Сейчас MTU ${inspection.mtu}, для AWG это часто слишком много`
+                      : "MTU не задан (будет ~1420), для AWG это часто слишком много"
+                  }
+                  checked={fixMtu}
+                  onChange={setFixMtu}
+                  bottomSeparator="none"
+                />
+              )}
+              {(inspection.warnings ?? []).map((w) => (
+                <div key={w} style={{ ...HINT, color: COLOR_WARNING }}>
+                  ⚠ {w}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
       </DialogBody>
       <DialogFooter>
         <DialogButton onClick={handleImport} disabled={!canImport}>
@@ -399,15 +414,17 @@ function SettingsSection() {
 }
 
 function DeleteConfigModal({
-  configName,
+  configs,
   closeModal,
   onSuccess,
 }: {
-  configName: string;
+  configs: ConfigInfo[];
   closeModal?: () => void;
   onSuccess: () => void;
 }) {
+  const [configName, setConfigName] = useState(configs[0]?.name ?? "");
   const [loading, setLoading] = useState(false);
+  const active = configs.find((c) => c.name === configName)?.active;
 
   const handleDelete = async () => {
     try {
@@ -418,10 +435,7 @@ function DeleteConfigModal({
         onSuccess();
         closeModal?.();
       } else {
-        toaster.toast({
-          title: "Ошибка удаления",
-          body: result.error ?? "Неизвестная ошибка",
-        });
+        toaster.toast({ title: "Ошибка удаления", body: result.error ?? "Неизвестная ошибка" });
       }
     } catch (e) {
       toaster.toast({ title: "Ошибка", body: String(e) });
@@ -434,17 +448,61 @@ function DeleteConfigModal({
     <ModalRoot onCancel={closeModal} closeModal={closeModal}>
       <DialogHeader>Удалить конфиг</DialogHeader>
       <DialogBody>
-        <div style={{ fontSize: "14px" }}>
-          Удалить конфиг «{configName}»? Интерфейс будет остановлен.
+        <div style={STACK}>
+          <DropdownItem
+            label="Конфиг"
+            rgOptions={configs.map((c) => ({ data: c.name, label: `${c.name} (${c.label})` }))}
+            selectedOption={configName}
+            onChange={(opt) => setConfigName(opt.data)}
+            bottomSeparator="none"
+          />
+          {active && <div style={TEXT}>Этот конфиг сейчас включён, VPN отключится.</div>}
         </div>
       </DialogBody>
       <DialogFooter>
-        <DialogButton onClick={handleDelete} disabled={loading}>
+        <DialogButton onClick={handleDelete} disabled={loading || !configName}>
           {loading ? "Удаление…" : "Удалить"}
         </DialogButton>
         <DialogButton onClick={closeModal}>Отмена</DialogButton>
       </DialogFooter>
     </ModalRoot>
+  );
+}
+
+/** Server picker under a subscription; the list is fetched when opened. */
+function SubscriptionServerPicker({ cfg, onChanged }: { cfg: ConfigInfo; onChanged: () => void }) {
+  const [servers, setServers] = useState<string[]>(cfg.server ? [cfg.server] : []);
+  const [busy, setBusy] = useState(false);
+
+  const loadThenShow = async (showMenu: () => void) => {
+    const res = await getSubscriptionServers(cfg.name);
+    if (res.success && res.servers) setServers(res.servers);
+    else toaster.toast({ title: "Подписка", body: res.error ?? "Не удалось загрузить серверы" });
+    showMenu();
+  };
+
+  const pick = async (server: string) => {
+    if (server === cfg.server) return;
+    setBusy(true);
+    try {
+      const res = await setSubscriptionServer(cfg.name, server);
+      toaster.toast(res.success ? { title: "Сервер сменён", body: server } : { title: "Ошибка", body: res.error ?? "" });
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <DropdownItem
+      label="Сервер"
+      rgOptions={servers.map((s) => ({ data: s, label: s }))}
+      selectedOption={cfg.server}
+      disabled={busy}
+      onMenuWillOpen={loadThenShow}
+      onChange={(opt) => pick(opt.data)}
+      bottomSeparator="none"
+    />
   );
 }
 
@@ -581,27 +639,13 @@ function Content() {
           <PanelSectionRow key={cfg.interface}>
             <ToggleField
               label={cfg.name}
-              description={`${cfg.label} · ${cfg.interface}`}
+              description={cfg.label}
               checked={cfg.active}
               disabled={!!loadingMap[cfg.name]}
               onChange={(val) => handleToggle(cfg.name, val)}
             />
+            {cfg.kind === "subscription" && <SubscriptionServerPicker cfg={cfg} onChanged={refreshConfigs} />}
             {cfg.active && status?.name === cfg.name && <StatusRows status={status} />}
-            <div style={{ marginTop: "4px" }}>
-              <ButtonItem
-                layout="below"
-                onClick={() =>
-                  showModal(
-                    <DeleteConfigModal
-                      configName={cfg.name}
-                      onSuccess={refreshConfigs}
-                    />
-                  )
-                }
-              >
-                Удалить конфиг
-              </ButtonItem>
-            </div>
           </PanelSectionRow>
         ))}
         <PanelSectionRow>
@@ -614,6 +658,16 @@ function Content() {
             Импортировать конфиг
           </ButtonItem>
         </PanelSectionRow>
+        {configs.length > 0 && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => showModal(<DeleteConfigModal configs={configs} onSuccess={refreshConfigs} />)}
+            >
+              Удалить конфиг…
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       <SettingsSection />

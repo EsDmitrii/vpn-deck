@@ -33,6 +33,7 @@ from vpn_deck import (
     read_routes,
     restore_last_active,
     curl_fetcher,
+    parse_subscription,
     to_rpc,
 )
 from vpn_deck.singbox import vless_label
@@ -193,17 +194,59 @@ class Plugin:
             pass
         return cfg.kind.label
 
+    def _subscription(self, name: str) -> Optional[SubscriptionConfig]:
+        cfg = self.config_manager.find(name)
+        if cfg is None or cfg.kind is not ConfigKind.SUBSCRIPTION:
+            return None
+        try:
+            return SubscriptionConfig.loads(self.config_manager.read(cfg))
+        except (OSError, ValueError, KeyError):
+            return None
+
     @_rpc
     async def list_configs_with_status(self) -> List[Json]:
         running = set(await asyncio.to_thread(self.controller.running_interfaces))
-        return [{
-            "name": c.name,
-            "kind": c.kind.value,
-            "label": self._label(c),
-            "interface": c.interface,
-            "managed_by": "vpn-deck",
-            "active": c.interface in running,
-        } for c in self.config_manager.list_managed()]
+        result: List[Json] = []
+        for c in self.config_manager.list_managed():
+            sub = self._subscription(c.name) if c.kind is ConfigKind.SUBSCRIPTION else None
+            result.append({
+                "name": c.name,
+                "kind": c.kind.value,
+                "label": self._label(c),
+                "interface": c.interface,
+                "managed_by": "vpn-deck",
+                "active": c.interface in running,
+                "server": sub.server if sub else None,
+            })
+        return result
+
+    @_rpc
+    async def get_subscription_servers(self, name: Any) -> Json:
+        """Server names currently in a subscription (fetched now)."""
+        sub = self._subscription(_arg(name, "name"))
+        if sub is None:
+            return {"success": False, "error": "Это не подписка"}
+        servers = parse_subscription(await asyncio.to_thread(self.fetch, sub.url))
+        return {"success": True, "error": None, "servers": [s.name for s in servers], "current": sub.server}
+
+    @_rpc
+    async def set_subscription_server(self, name: Any, server: str = "") -> Json:
+        """Switches a subscription to another server; reconnects if it is on."""
+        if isinstance(name, dict):
+            name, server = name.get("name", ""), name.get("server", "")
+        sub = self._subscription(name)
+        if sub is None:
+            return {"success": False, "error": "Это не подписка"}
+        servers = parse_subscription(await asyncio.to_thread(self.fetch, sub.url))
+        picked = next((s for s in servers if s.name == server), None)
+        if picked is None:
+            return {"success": False, "error": f"Сервера «{server}» нет в подписке"}
+        updated = SubscriptionConfig(url=sub.url, server=picked.name, link=picked.link)
+        self.config_manager.write(name, updated.dumps(), ConfigKind.SUBSCRIPTION)
+        reloaded = await asyncio.to_thread(self.controller.reload, name)
+        if reloaded is not None and not reloaded.success:
+            return {"success": False, "error": f"Сервер сменён, но не переподключился: {reloaded.error}"}
+        return {"success": True, "error": None}
 
     async def _toggle(self, config_name: Any, action: Callable[[str], Any], op: str) -> Json:
         name = _arg(config_name, "config_name")

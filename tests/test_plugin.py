@@ -60,6 +60,22 @@ class PluginTest(unittest.TestCase):
         self.assertTrue(run(self.plugin.delete_vpn_config({"name": "proxy"}))["success"])
         self.assertEqual([c["name"] for c in run(self.plugin.list_configs_with_status())], ["home"])
 
+    def test_subscription_server_switch(self):
+        import base64
+        links = [f"vless://11111111-2222-3333-4444-555555555555@{h}.example:443?type=tcp#{h}" for h in ("nl", "de")]
+        self.runner.on("curl", stdout=base64.b64encode("\n".join(links).encode()).decode())
+        path = self.file("sub.txt", "https://sub.example/s/x")
+        self.assertEqual(run(self.plugin.inspect_import(path))["servers"], ["nl", "de"])
+        self.assertTrue(run(self.plugin.import_vpn_config("sub", path))["success"])
+        row = run(self.plugin.list_configs_with_status())[0]
+        self.assertEqual((row["kind"], row["server"], row["label"]), ("subscription", "nl", "Подписка · nl"))
+
+        self.assertEqual(run(self.plugin.get_subscription_servers("sub"))["servers"], ["nl", "de"])
+        self.assertTrue(run(self.plugin.set_subscription_server({"name": "sub", "server": "de"}))["success"])
+        self.assertEqual(run(self.plugin.list_configs_with_status())[0]["server"], "de")
+        self.assertFalse(run(self.plugin.set_subscription_server("sub", "jp"))["success"])
+        self.assertFalse(run(self.plugin.get_subscription_servers("nope"))["success"])
+
     def test_import_errors_are_plain_messages(self):
         r = run(self.plugin.import_vpn_config("x", self.file("x.txt", "hello")))
         self.assertFalse(r["success"])
