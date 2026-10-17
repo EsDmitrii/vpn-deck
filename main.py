@@ -28,6 +28,7 @@ from vpn_deck import (
     SubprocessRunner,
     TunnelController,
     is_online,
+    check_import_text,
     plan_import,
     read_import_file,
     read_routes,
@@ -325,16 +326,25 @@ class Plugin:
     async def scan_existing_configs(self) -> Dict[str, List[Json]]:
         return await self.config_manager.scan_existing_configs()
 
-    @_rpc
-    async def inspect_import(self, path: Any = "") -> Json:
-        """What importing `path` would do, without storing anything."""
-        path = _arg(path, "path")
-        if not os.path.isfile(path):
-            return {"success": False, "error": "Файл не найден"}
-        plan = await asyncio.to_thread(plan_import, read_import_file(path), fetch=self.fetch)
+    # Import works on text; the file variants only read the file first.
+    async def _inspect(self, text: str) -> Json:
+        plan = await asyncio.to_thread(plan_import, text, fetch=self.fetch)
         return {"success": True, "error": None, "kind": plan.kind.value, "label": plan.label,
                 "mtu": plan.mtu, "mtu_warning": plan.mtu_warning, "warnings": list(plan.warnings),
                 "servers": list(plan.servers)}
+
+    @_rpc
+    async def inspect_import(self, path: Any = "") -> Json:
+        """What importing the file at `path` would do, without storing anything."""
+        path = _arg(path, "path")
+        if not os.path.isfile(path):
+            return {"success": False, "error": "Файл не найден"}
+        return await self._inspect(read_import_file(path))
+
+    @_rpc
+    async def inspect_text(self, text: Any = "") -> Json:
+        """Same for text typed or pasted into the import field."""
+        return await self._inspect(check_import_text(_arg(text, "text")))
 
     @_rpc
     async def import_vpn_config(self, name: str, path: str = "", mtu: Optional[int] = None,
@@ -342,8 +352,16 @@ class Plugin:
         decky.logger.info(f"import_vpn_config: name={name}, path={path}, mtu={mtu}, server={server}")
         if not os.path.isfile(path):
             return {"success": False, "error": "Файл не найден"}
-        plan = await asyncio.to_thread(plan_import, read_import_file(path), mtu_override=mtu,
-                                       server=server, fetch=self.fetch)
+        return await self._import(name, read_import_file(path), mtu, server)
+
+    @_rpc
+    async def import_text(self, name: str, text: str = "", mtu: Optional[int] = None,
+                          server: Optional[str] = None) -> Json:
+        decky.logger.info(f"import_text: name={name}, mtu={mtu}, server={server}")
+        return await self._import(name, check_import_text(text), mtu, server)
+
+    async def _import(self, name: str, text: str, mtu: Optional[int], server: Optional[str]) -> Json:
+        plan = await asyncio.to_thread(plan_import, text, mtu_override=mtu, server=server, fetch=self.fetch)
         cfg = self.config_manager.write(name, plan.content, plan.kind)
         reloaded = await asyncio.to_thread(self.controller.reload, cfg.name)
         if reloaded is not None and not reloaded.success:

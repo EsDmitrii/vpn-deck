@@ -104,6 +104,8 @@ const vpnStopConfig = callable<[{ config_name: string }], VPNOpResult>(
 );
 const getConnectionStatus = callable<[], ConnectionStatus | null>("get_connection_status");
 const inspectImport = callable<[string], ImportInspection>("inspect_import");
+const inspectText = callable<[string], ImportInspection>("inspect_text");
+const importText = callable<[string, string, number | null, string | null], ImportResult>("import_text");
 const importVpnConfig = callable<[string, string, number | null, string | null], ImportResult>(
   "import_vpn_config",
 );
@@ -198,6 +200,25 @@ function nameFromFile(path: string): string {
   return base.replace(/\.(conf|txt|vpn|json)$/i, "").slice(0, CONFIG_NAME_MAX_LEN);
 }
 
+const DEFAULT_NAMES: Record<ConfigKind, string> = {
+  awg: "awg",
+  vless: "vless",
+  singbox: "singbox",
+  subscription: "sub",
+};
+
+/** `base`, or `base2`, `base3`… if taken. */
+function uniqueName(base: string, taken: string[]): string {
+  if (!taken.includes(base)) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `${base.slice(0, CONFIG_NAME_MAX_LEN - String(i).length)}${i}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
+/** Where the config comes from: text in the field, or a picked file. */
+type ImportSource = { kind: "text"; text: string } | { kind: "file"; path: string };
+
 function validateConfigName(name: string): { valid: boolean; error?: string } {
   const trimmed = name.trim();
   if (!trimmed) {
@@ -219,18 +240,53 @@ function validateConfigName(name: string): { valid: boolean; error?: string } {
 }
 
 function ImportConfigModal({
+  existingNames,
   closeModal,
   onSuccess,
 }: {
+  existingNames: string[];
   closeModal?: () => void;
   onSuccess: () => void;
 }) {
+  const [text, setText] = useState("");
+  const [source, setSource] = useState<ImportSource | null>(null);
   const [name, setName] = useState("");
-  const [filePath, setFilePath] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [inspection, setInspection] = useState<ImportInspection | null>(null);
+  const [checking, setChecking] = useState(false);
   const [fixMtu, setFixMtu] = useState(true);
   const [server, setServer] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const applyInspection = (inspected: ImportInspection, suggested: string) => {
+    setInspection(inspected);
+    setServer(inspected.servers?.[0] ?? null);
+    if (!nameTouched) setName(uniqueName(suggested, existingNames));
+  };
+
+  // Typed/pasted text is checked once the user stops typing.
+  useEffect(() => {
+    if (source?.kind === "file" || !text.trim()) {
+      if (source?.kind !== "file") setInspection(null);
+      return;
+    }
+    let cancelled = false; // a newer edit superseded this check
+    const timer = setTimeout(async () => {
+      setChecking(true);
+      try {
+        const inspected = await inspectText(text);
+        if (cancelled) return;
+        setSource({ kind: "text", text });
+        applyInspection(inspected, DEFAULT_NAMES[inspected.kind ?? "awg"]);
+      } finally {
+        if (!cancelled) setChecking(false);
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [text]);
 
   const handlePickFile = async () => {
     try {
@@ -242,17 +298,19 @@ function ImportConfigModal({
         undefined,
         IMPORT_EXTENSIONS,
       );
-      setFilePath(res.realpath);
-      setName(nameFromFile(res.realpath));
-      const inspected = await inspectImport(res.realpath);
-      setInspection(inspected);
-      setServer(inspected.servers?.[0] ?? null);
+      setText("");
+      setSource({ kind: "file", path: res.realpath });
+      setChecking(true);
+      applyInspection(await inspectImport(res.realpath), nameFromFile(res.realpath));
     } catch (e) {
       console.error(e);
+    } finally {
+      setChecking(false);
     }
   };
 
   const handleImport = async () => {
+    if (!source) return;
     const validation = validateConfigName(name);
     if (!validation.valid) {
       toaster.toast({ title: "Ошибка", body: validation.error ?? "Неверное имя конфига" });
@@ -262,7 +320,10 @@ function ImportConfigModal({
     const mtu = inspection?.mtu_warning && fixMtu ? RECOMMENDED_AWG_MTU : null;
     setLoading(true);
     try {
-      const result = await importVpnConfig(trimmedName, filePath, mtu, server);
+      const result =
+        source.kind === "text"
+          ? await importText(trimmedName, source.text, mtu, server)
+          : await importVpnConfig(trimmedName, source.path, mtu, server);
       if (!result.success) {
         toaster.toast({ title: "Ошибка импорта", body: result.error ?? "Неизвестная ошибка" });
         return;
@@ -280,36 +341,48 @@ function ImportConfigModal({
     }
   };
 
-  const fileName = filePath.split("/").pop();
-  const canImport = !loading && !!inspection?.success;
+  const sourceName = source?.kind === "file" ? source.path.split("/").pop() : "Ссылка";
+  const canImport = !loading && !checking && !!inspection?.success;
 
   return (
     <ModalRoot onCancel={closeModal} closeModal={closeModal}>
       <DialogHeader>Импорт конфига</DialogHeader>
       <DialogBody>
         <div style={STACK}>
+          <TextField
+            label="Ссылка или URL подписки"
+            description="vpn://, vless://, https://… подписки или JSON sing-box"
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              if (source?.kind === "file") setSource(null);
+            }}
+            disabled={loading}
+          />
           <div>
             <DialogButton onClick={handlePickFile} disabled={loading}>
-              {filePath ? "Выбрать другой файл" : "Выбрать файл"}
+              {source?.kind === "file" ? "Выбрать другой файл" : "…или выбрать файл"}
             </DialogButton>
-            <div style={HINT}>
-              .conf AmneziaWG, ссылка vpn:// или vless:// или URL подписки в .txt, JSON sing-box
-            </div>
+            <div style={HINT}>.conf, .txt со ссылкой, .json — например из «Загрузок»</div>
           </div>
+          {checking && <div style={HINT}>Проверка…</div>}
           {inspection && !inspection.success && (
             <div style={{ ...TEXT, color: COLOR_ERROR }}>
-              {fileName}: {inspection.error}
+              {sourceName}: {inspection.error}
             </div>
           )}
           {inspection?.success && (
             <>
               <div style={TEXT}>
-                {fileName} — {inspection.label}
+                {sourceName} — {inspection.label}
               </div>
               <TextField
                 label="Имя конфига"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setNameTouched(true);
+                }}
                 description="до 12 символов: a-z, 0-9, _ = + . -"
               />
               {(inspection.servers?.length ?? 0) > 0 && (
@@ -652,7 +725,9 @@ function Content() {
           <ButtonItem
             layout="below"
             onClick={() =>
-              showModal(<ImportConfigModal onSuccess={refreshConfigs} />)
+              showModal(
+                <ImportConfigModal existingNames={configs.map((c) => c.name)} onSuccess={refreshConfigs} />,
+              )
             }
           >
             Импортировать конфиг

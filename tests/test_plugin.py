@@ -76,6 +76,13 @@ class PluginTest(unittest.TestCase):
         self.assertFalse(run(self.plugin.set_subscription_server("sub", "jp"))["success"])
         self.assertFalse(run(self.plugin.get_subscription_servers("nope"))["success"])
 
+    def test_import_from_text(self):
+        link = "  vless://11111111-2222-3333-4444-555555555555@h:443?security=reality&pbk=k  "
+        self.assertEqual(run(self.plugin.inspect_text(link))["label"], "VLESS REALITY")
+        self.assertTrue(run(self.plugin.import_text("v", link))["success"])
+        self.assertEqual(run(self.plugin.list_configs_with_status())[0]["kind"], "vless")
+        self.assertIn("Вставьте", run(self.plugin.inspect_text("   "))["error"])
+
     def test_import_errors_are_plain_messages(self):
         r = run(self.plugin.import_vpn_config("x", self.file("x.txt", "hello")))
         self.assertFalse(r["success"])

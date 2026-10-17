@@ -35,6 +35,25 @@ from .subscription import SubscriptionConfig, find_server, is_subscription_url, 
 HOOK_KEYS = {"preup": "PreUp", "postup": "PostUp", "predown": "PreDown", "postdown": "PostDown"}
 
 
+def check_import_text(text: str) -> str:
+    """Limits for text pasted into the import field."""
+    if len(text.encode("utf-8")) > MAX_IMPORT_BYTES:
+        raise ConfigImportError("Текст больше 1 МБ, это не похоже на конфиг")
+    if not text.strip():
+        raise ConfigImportError("Вставьте ссылку, URL подписки или конфиг")
+    return text
+
+
+def unflatten_conf(text: str) -> str:
+    """A .conf pasted into a single-line field loses its line breaks:
+    "[Interface] PrivateKey = … Address = … [Peer] …". Restore them before
+    sections and `Key =` pairs."""
+    if "\n" in text.strip() or "[Interface]" not in text:
+        return text
+    text = re.sub(r"\s+(?=\[\w+\])", "\n", text.strip())
+    return re.sub(r"\s+(?=[A-Za-z][A-Za-z0-9]*\s*=\s)", "\n", text) + "\n"
+
+
 def read_import_file(path: str) -> str:
     """Reads a file to import, enforcing size and encoding limits."""
     with open(path, "rb") as f:
@@ -295,4 +314,4 @@ def plan_import(text: str, mtu_override: Optional[int] = None, server: Optional[
     vpn = _single_link(stripped, "vpn://")
     if vpn:
         return _plan_awg(decode_vpn_uri(vpn), from_link=True, mtu_override=mtu_override)
-    return _plan_awg(text, from_link=False, mtu_override=mtu_override)
+    return _plan_awg(unflatten_conf(text), from_link=False, mtu_override=mtu_override)

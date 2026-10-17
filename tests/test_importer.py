@@ -164,6 +164,14 @@ class PlanImportTest(unittest.TestCase):
         self.assertIs(plan.kind, ConfigKind.SINGBOX)
         self.assertEqual(json.loads(plan.content), cfg)
 
+    def test_conf_pasted_as_one_line(self):
+        flat = " ".join(CONF.split())
+        plan = plan_import(flat)
+        self.assertIs(plan.kind, ConfigKind.AWG)
+        self.assertIn("Endpoint = vpn.example.com:51820\n", plan.content)
+        self.assertIn("DNS = $PRIMARY_DNS, $SECONDARY_DNS\n", plan.content)
+        self.assertIn("PrivateKey = cHJpdmF0ZQ==\n", plan.content)
+
     def test_several_links_refused(self):
         with self.assertRaises(ConfigImportError):
             plan_import("vless://a@b:1\nvless://c@d:2\n")
