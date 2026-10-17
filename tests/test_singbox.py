@@ -98,6 +98,10 @@ class BuildConfigTest(unittest.TestCase):
         self.assertEqual(actions[:2], ["sniff", "hijack-dns"])  # DNS hijack before private->direct
         self.assertEqual(cfg["dns"]["strategy"], "ipv4_only")
 
+    def test_no_direct_domains_by_default(self):
+        rules = build_vless_config(link("type=tcp"), "vd-x")["route"]["rules"]
+        self.assertFalse(any("domain" in r for r in rules))
+
     def test_options(self):
         cfg = build_vless_config(link("type=tcp"), "vd-x", options=VlessOptions(dns_server="9.9.9.9", ipv4_only=False))
         self.assertEqual(cfg["dns"]["servers"][0]["server"], "9.9.9.9")

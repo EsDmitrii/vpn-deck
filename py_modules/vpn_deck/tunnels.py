@@ -15,6 +15,7 @@ import json
 import socket
 import threading
 from typing import Callable, Dict, List, Optional, Protocol
+from urllib.parse import urlsplit
 
 import decky
 
@@ -72,23 +73,28 @@ class SingBoxBackend:
         self.fetch = fetch
         self.resolver = resolver
 
-    def _subscription_link(self, cfg: StoredConfig) -> str:
-        """Server's current link; falls back to the stored one when offline
-        or the subscription changed shape."""
+    def _subscription(self, cfg: StoredConfig) -> SubscriptionConfig:
+        """Stored subscription with the server's current link; falls back to
+        the stored link when offline or the subscription changed shape."""
         stored = SubscriptionConfig.loads(self.configs.read(cfg))
         try:
             fresh = refresh(stored, self.fetch)
         except ConfigImportError as e:
             decky.logger.warning(f"{cfg.name}: subscription refresh failed, using stored link: {e}")
-            return stored.link
+            return stored
         if fresh != stored:
             self.configs.write(cfg.name, fresh.dumps(), ConfigKind.SUBSCRIPTION)
-        return fresh.link
+        return fresh
 
     def start(self, cfg: StoredConfig) -> OpResult:
         content = self.configs.read(cfg)
+        direct: List[str] = []
         if cfg.kind is ConfigKind.SUBSCRIPTION:
-            content = self._subscription_link(cfg)
+            sub = self._subscription(cfg)
+            content = sub.link
+            host = urlsplit(sub.url).hostname
+            if host:
+                direct.append(host)
         if cfg.kind in (ConfigKind.VLESS, ConfigKind.SUBSCRIPTION):
             server = vless_server(content)
             server_ip = None if is_ip(server) else self.resolver(server)
@@ -96,7 +102,7 @@ class SingBoxBackend:
                 return OpResult.fail(f"Не удалось получить адрес сервера {server}")
             options = VlessOptions(dns_server=self.settings.get("vless_dns_server"),
                                    ipv4_only=self.settings.get("vless_ipv4_only"))
-            config = build_vless_config(content, cfg.interface, server_ip, options)
+            config = build_vless_config(content, cfg.interface, server_ip, options, direct_domains=direct)
         else:
             config = prepare_user_singbox(json.loads(content), cfg.interface)
         return self.manager.start(cfg.interface, config)

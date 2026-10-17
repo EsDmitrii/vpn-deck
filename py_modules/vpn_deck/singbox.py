@@ -15,7 +15,7 @@ import copy
 import ipaddress
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import defaults
@@ -161,9 +161,13 @@ def vless_label(link: str) -> str:
 
 
 def build_vless_config(link: str, interface: str, server_ip: Optional[str] = None,
-                       options: VlessOptions = VlessOptions()) -> Json:
+                       options: VlessOptions = VlessOptions(), direct_domains: Sequence[str] = ()) -> Json:
     """Whole-device TUN config: everything via the proxy, private ranges
     direct, DNS hijacked to DoH through the proxy.
+
+    `direct_domains` bypass the proxy (matched on the sniffed TLS/HTTP host).
+    Used for the subscription's own host: providers often don't let their
+    exits reach it, so refreshing it while connected would hang.
 
     The plugin resolves the server name before start and passes `server_ip`:
     resolving through the system resolver once the TUN is up would loop the
@@ -195,6 +199,7 @@ def build_vless_config(link: str, interface: str, server_ip: Optional[str] = Non
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
                 {"ip_is_private": True, "outbound": DIRECT_TAG},
+                *([{"domain": list(direct_domains), "outbound": DIRECT_TAG}] if direct_domains else []),
             ],
             "final": PROXY_TAG,
             "auto_detect_interface": True,

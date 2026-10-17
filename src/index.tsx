@@ -144,7 +144,7 @@ const repairSymlinks = callable<[], SymlinkRepairResult>("repair_symlinks");
 
 interface DiagnosticsProbe {
   name: string;
-  kind: "ping" | "http";
+  kind: "ping" | "http" | "trace";
   target: string;
   ok: boolean;
   detail: string;
@@ -678,16 +678,20 @@ function SubscriptionServerButton({
     onChanged();
     return res.success;
   };
+  const open = () => showModal(<ServerPickerModal load={load} current={cfg.server} onPick={pick} />);
+  // A whole-row link like Steam's settings entries, not a big button.
   return (
-    <ButtonItem
-      layout="inline"
+    <Field
       label="Сервер"
       description={cfg.server ?? "—"}
       bottomSeparator={separator}
-      onClick={() => showModal(<ServerPickerModal load={load} current={cfg.server} onPick={pick} />)}
+      focusable
+      highlightOnFocus
+      onActivate={open}
+      onClick={open}
     >
-      Сменить
-    </ButtonItem>
+      <span style={{ fontSize: "20px", color: "#8b929a" }}>›</span>
+    </Field>
   );
 }
 

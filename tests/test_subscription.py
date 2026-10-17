@@ -107,6 +107,11 @@ class BackendTest(unittest.TestCase):
         self.assertEqual((out["server"], out["tls"]["server_name"]), ("203.0.113.9", "de2.example"))
         self.assertEqual(SubscriptionConfig.loads(self.configs.read(self.cfg)).link, rotated)
 
+    def test_subscription_host_bypasses_the_proxy(self):
+        self.backend(lambda _: b64(DE)).start(self.cfg)
+        rules = self.manager.started[0]["route"]["rules"]
+        self.assertIn({"domain": ["sub.example"], "outbound": "direct"}, rules)
+
     def test_offline_falls_back_to_stored_link(self):
         def offline(_):
             raise ConfigImportError("no network")
