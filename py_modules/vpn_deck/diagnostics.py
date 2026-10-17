@@ -3,14 +3,14 @@
 import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import decky
 
 from ._utils import clean_env
 
 
-DEFAULT_TARGETS: List[Dict] = [
+DEFAULT_TARGETS: List[Dict[str, Any]] = [
     {"name": "1.1.1.1", "kind": "ping", "host": "1.1.1.1"},
     {"name": "google.com", "kind": "http", "url": "https://www.google.com"},
     {"name": "rutracker.org", "kind": "http", "url": "https://rutracker.org"},
@@ -18,14 +18,14 @@ DEFAULT_TARGETS: List[Dict] = [
 
 
 class Diagnostics:
-    def check(self, targets: Optional[List[Dict]] = None) -> List[Dict]:
+    def check(self, targets: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         probes = targets if targets else DEFAULT_TARGETS
         if not probes:
             return []
         with ThreadPoolExecutor(max_workers=len(probes)) as pool:
             return list(pool.map(self._probe, probes))
 
-    def _probe(self, t: Dict) -> Dict:
+    def _probe(self, t: Dict[str, Any]) -> Dict[str, Any]:
         kind = t.get("kind")
         name = t.get("name") or t.get("host") or t.get("url") or "?"
         if kind == "ping":
@@ -35,7 +35,7 @@ class Diagnostics:
         return {"name": name, "kind": kind or "unknown", "ok": False, "detail": f"unknown kind: {kind}", "target": "", "latency_ms": None}
 
     @staticmethod
-    def _ping(name: str, host: str) -> Dict:
+    def _ping(name: str, host: str) -> Dict[str, Any]:
         try:
             r = subprocess.run(
                 ["ping", "-c", "3", "-W", "2", "-n", host],
@@ -57,7 +57,7 @@ class Diagnostics:
             return {"name": name, "kind": "ping", "target": host, "ok": False, "detail": "ping not found", "latency_ms": None}
 
     @staticmethod
-    def _http(name: str, url: str) -> Dict:
+    def _http(name: str, url: str) -> Dict[str, Any]:
         try:
             r = subprocess.run(
                 ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code} %{time_total}",

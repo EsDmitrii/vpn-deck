@@ -1,0 +1,11 @@
+{
+  "include": ["py_modules", "main.py"],
+  "extraPaths": ["py_modules"],
+  "stubPath": ".",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "strict",
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportMissingModuleSource": false
+}

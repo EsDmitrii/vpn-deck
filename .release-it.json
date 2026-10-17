@@ -10,6 +10,7 @@
     "release": true,
     "releaseName": "v${version}",
     "assets": [
+      "./out/vpn-deck.zip",
       "./out/vpn-deck-v*.zip"
     ],
     "draft": false,

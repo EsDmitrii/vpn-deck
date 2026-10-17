@@ -4,6 +4,7 @@ import {
   DialogButton,
   DialogFooter,
   DialogHeader,
+  Field,
   ModalRoot,
   PanelSection,
   PanelSectionRow,
@@ -13,7 +14,6 @@ import {
   ToggleField,
 } from "@decky/ui";
 import {
-  call,
   callable,
   definePlugin,
   FileSelectionType,
@@ -31,11 +31,57 @@ interface VPNError {
   details: Record<string, any>;
 }
 
+// Mirrors py_modules/vpn_deck/models.py (ConfigKind, ConnectionStatus, ...).
+type ConfigKind = "awg" | "vless" | "singbox";
+
 interface ConfigInfo {
   name: string;
+  kind: ConfigKind;
+  label: string; // e.g. "AWG", "VLESS REALITY"
   interface: string;
   active: boolean;
   managed_by: string;
+}
+
+interface ExitInfo {
+  ip: string;
+  country: string | null;
+  checked_at: number;
+}
+
+interface ConnectionStatus {
+  name: string;
+  kind: ConfigKind;
+  interface: string;
+  addresses: string[];
+  latest_handshake: number | null; // unix time, AWG only
+  rx_bytes_per_sec: number | null;
+  tx_bytes_per_sec: number | null;
+  exit: ExitInfo | null;
+}
+
+interface RpcResult {
+  success: boolean;
+  error: string | null;
+}
+
+interface ImportInspection extends RpcResult {
+  kind?: ConfigKind;
+  label?: string;
+  mtu?: number | null;
+  mtu_warning?: boolean;
+  warnings?: string[];
+}
+
+interface ImportResult extends RpcResult {
+  kind?: ConfigKind;
+  warnings?: string[];
+}
+
+interface PluginSettings {
+  restore_on_boot: boolean;
+  vless_dns_server: string;
+  vless_ipv4_only: boolean;
 }
 
 interface VPNOpResult {
@@ -53,6 +99,11 @@ const vpnStartConfig = callable<[{ config_name: string }], VPNOpResult>(
 const vpnStopConfig = callable<[{ config_name: string }], VPNOpResult>(
   "vpn_stop_config",
 );
+const getConnectionStatus = callable<[], ConnectionStatus | null>("get_connection_status");
+const inspectImport = callable<[string], ImportInspection>("inspect_import");
+const importVpnConfig = callable<[string, string, number | null], ImportResult>("import_vpn_config");
+const getSettings = callable<[], PluginSettings>("get_settings");
+const setSetting = callable<[string, PluginSettings[keyof PluginSettings]], RpcResult>("set_setting");
 const getErrors = callable<[], VPNError[]>("get_errors");
 const clearErrors = callable<[], boolean>("clear_errors");
 
@@ -93,8 +144,43 @@ const diagnoseConnectivity = callable<[], DiagnosticsProbe[]>("diagnose_connecti
 const CONFIG_NAME_MAX_LEN = 12; // 3 (префикс "vd-") + 12 = 15
 const CONFIG_NAME_REGEX = /^[a-zA-Z0-9_=+.-]+$/;
 
+const RECOMMENDED_AWG_MTU = 1280; // keep in sync with defaults.RECOMMENDED_AWG_MTU
+const IMPORT_EXTENSIONS = ["conf", "txt", "vpn", "json"];
+
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
+}
+
+function formatSpeed(bytesPerSec: number | null): string {
+  if (bytesPerSec === null) return "—";
+  const units = ["Б/с", "КБ/с", "МБ/с", "ГБ/с"];
+  let value = bytesPerSec;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatAgo(unixTime: number | null): string {
+  if (unixTime === null) return "ещё не было";
+  const sec = Math.max(0, Math.round(Date.now() / 1000 - unixTime));
+  if (sec < 60) return `${sec} с назад`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} мин назад`;
+  return `${Math.floor(sec / 3600)} ч назад`;
+}
+
+/** "NL" -> 🇳🇱 */
+function countryFlag(code: string | null): string {
+  if (!code || !/^[A-Z]{2}$/.test(code)) return "";
+  return String.fromCodePoint(...[...code].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+/** Config name suggested from a file name: extension dropped, cut to the limit. */
+function nameFromFile(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  return base.replace(/\.(conf|txt|vpn|json)$/i, "").slice(0, CONFIG_NAME_MAX_LEN);
 }
 
 function validateConfigName(name: string): { valid: boolean; error?: string } {
@@ -126,8 +212,9 @@ function ImportConfigModal({
 }) {
   const [name, setName] = useState("");
   const [filePath, setFilePath] = useState("");
+  const [inspection, setInspection] = useState<ImportInspection | null>(null);
+  const [fixMtu, setFixMtu] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
 
   const handlePickFile = async () => {
     try {
@@ -137,93 +224,161 @@ function ImportConfigModal({
         true,
         true,
         undefined,
-        ["conf"],
+        IMPORT_EXTENSIONS,
       );
-      const filename =
-        res.realpath
-          .split("/")
-          .pop()
-          ?.replace(/\.conf$/, "") ?? "";
       setFilePath(res.realpath);
-      setName(filename);
-      setStatus(res.realpath.split("/").pop() ?? "");
+      setName(nameFromFile(res.realpath));
+      setInspection(await inspectImport(res.realpath));
     } catch (e) {
       console.error(e);
     }
   };
 
   const handleImport = async () => {
-
+    const validation = validateConfigName(name);
+    if (!validation.valid) {
+      toaster.toast({ title: "Ошибка", body: validation.error ?? "Неверное имя конфига" });
+      return;
+    }
+    const trimmedName = name.trim();
+    const mtu = inspection?.mtu_warning && fixMtu ? RECOMMENDED_AWG_MTU : null;
+    setLoading(true);
     try {
-      const validation = validateConfigName(name);
-      if (!validation.valid) {
-        toaster.toast({ title: "Ошибка", body: validation.error ?? "Неверное имя конфига" });
+      const result = await importVpnConfig(trimmedName, filePath, mtu);
+      if (!result.success) {
+        toaster.toast({ title: "Ошибка импорта", body: result.error ?? "Неизвестная ошибка" });
         return;
       }
-      const trimmedName = name.trim();
-
-      setLoading(true);
-      setStatus("Импорт конфига...");
-
-      const result = await call<
-        [string, string],
-        { success: boolean; error: string }
-      >("import_vpn_config", trimmedName, filePath);
-      if (result.success) {
-        setStatus("Конфиг сохранён");
-        toaster.toast({ title: "Конфиг импортирован", body: trimmedName });
-        onSuccess();
-        closeModal?.();
-      } else {
-        setStatus("");
-        toaster.toast({
-          title: "Ошибка импорта",
-          body: result.error ?? "Неизвестная ошибка",
-        });
+      toaster.toast({ title: "Конфиг импортирован", body: trimmedName });
+      for (const warning of result.warnings ?? []) {
+        toaster.toast({ title: "Внимание", body: warning });
       }
+      onSuccess();
+      closeModal?.();
     } catch (e) {
-      setStatus("");
       toaster.toast({ title: "Ошибка", body: String(e) });
     } finally {
       setLoading(false);
     }
   };
 
+  const fileName = filePath.split("/").pop();
+  const canImport = !loading && !!inspection?.success;
+
   return (
     <ModalRoot onCancel={closeModal} closeModal={closeModal}>
       <DialogHeader>Импорт конфига</DialogHeader>
       <DialogBody>
         <DialogButton onClick={handlePickFile} disabled={loading}>
-          {filePath ? "Выбрать другой файл" : "Выбрать файл .conf"}
+          {filePath ? "Выбрать другой файл" : "Выбрать файл"}
         </DialogButton>
-        {filePath && (
-          <div style={{ marginTop: "12px" }}>
-            <TextField
-              label="Имя конфига"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              description="до 12 символов: a-z, 0-9, _ = + . -"
-            />
+        <div style={{ marginTop: "6px", fontSize: "12px", color: "#8b929a" }}>
+          .conf AmneziaWG, ссылка vpn:// или vless:// в .txt/.vpn, JSON sing-box
+        </div>
+        {inspection && !inspection.success && (
+          <div style={{ marginTop: "12px", fontSize: "13px", color: "#f87171" }}>
+            {fileName}: {inspection.error}
           </div>
         )}
-        {status && (
-          <div style={{ marginTop: "8px", fontSize: "12px", color: "#8b929a" }}>
-            {status}
-          </div>
+        {inspection?.success && (
+          <>
+            <div style={{ marginTop: "12px", fontSize: "13px" }}>
+              {fileName} — {inspection.label}
+            </div>
+            <div style={{ marginTop: "12px" }}>
+              <TextField
+                label="Имя конфига"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                description="до 12 символов: a-z, 0-9, _ = + . -"
+              />
+            </div>
+            {inspection.mtu_warning && (
+              <ToggleField
+                label={`Установить MTU ${RECOMMENDED_AWG_MTU}`}
+                description={
+                  inspection.mtu
+                    ? `Сейчас MTU ${inspection.mtu}: для AWG это часто слишком много, соединение может не работать`
+                    : "MTU не задан, будет ~1420: для AWG это часто слишком много, соединение может не работать"
+                }
+                checked={fixMtu}
+                onChange={setFixMtu}
+              />
+            )}
+            {(inspection.warnings ?? []).map((w) => (
+              <div key={w} style={{ marginTop: "8px", fontSize: "12px", color: "#fbbf24" }}>
+                ⚠ {w}
+              </div>
+            ))}
+          </>
         )}
       </DialogBody>
       <DialogFooter>
-        <DialogButton
-          onClick={handleImport}
-          disabled={
-            loading
-          }
-        >
+        <DialogButton onClick={handleImport} disabled={!canImport}>
           {loading ? "Импорт..." : "Импортировать"}
         </DialogButton>
         <DialogButton onClick={closeModal}>Отмена</DialogButton>
       </DialogFooter>
     </ModalRoot>
+  );
+}
+
+function StatusRows({ status }: { status: ConnectionStatus }) {
+  const exit = status.exit
+    ? `${countryFlag(status.exit.country)} ${status.exit.ip}`.trim()
+    : "проверяется…";
+  return (
+    <>
+      <Field label="Выход в интернет" padding="compact">{exit}</Field>
+      {status.addresses.length > 0 && (
+        <Field label="Адрес в VPN" padding="compact">{status.addresses[0]}</Field>
+      )}
+      <Field label="Скорость" padding="compact">
+        ↓ {formatSpeed(status.rx_bytes_per_sec)} ↑ {formatSpeed(status.tx_bytes_per_sec)}
+      </Field>
+      {status.kind === "awg" && (
+        <Field label="Handshake" padding="compact">{formatAgo(status.latest_handshake)}</Field>
+      )}
+    </>
+  );
+}
+
+function SettingsSection() {
+  const [settings, setSettings] = useState<PluginSettings | null>(null);
+
+  useEffect(() => {
+    getSettings().then(setSettings).catch((e) => console.error("Failed to load settings:", e));
+  }, []);
+
+  const update = async <K extends keyof PluginSettings>(key: K, value: PluginSettings[K]) => {
+    const res = await setSetting(key, value);
+    if (!res.success) {
+      toaster.toast({ title: "Ошибка", body: res.error ?? "Не удалось сохранить" });
+      return;
+    }
+    setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  if (!settings) return null;
+  return (
+    <PanelSection title="Настройки">
+      <PanelSectionRow>
+        <ToggleField
+          label="Подключать после перезагрузки"
+          description="Включить конфиг, который был включён до выключения Deck"
+          checked={settings.restore_on_boot}
+          onChange={(v) => update("restore_on_boot", v)}
+        />
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ToggleField
+          label="VLESS: только IPv4"
+          description={`DNS ${settings.vless_dns_server} через прокси. Выключите, если сервер умеет IPv6`}
+          checked={settings.vless_ipv4_only}
+          onChange={(v) => update("vless_ipv4_only", v)}
+        />
+      </PanelSectionRow>
+    </PanelSection>
   );
 }
 
@@ -279,6 +434,7 @@ function DeleteConfigModal({
 
 function Content() {
   const [configs, setConfigs] = useState<ConfigInfo[]>([]);
+  const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<VPNError[]>([]);
   const [showErrors, setShowErrors] = useState<boolean>(false);
@@ -290,6 +446,7 @@ function Content() {
     try {
       const result = await listConfigsWithStatus();
       setConfigs(result);
+      setStatus(result.some((c) => c.active) ? await getConnectionStatus() : null);
     } catch (error) {
       console.error("Failed to refresh configs:", error);
     }
@@ -408,11 +565,12 @@ function Content() {
           <PanelSectionRow key={cfg.interface}>
             <ToggleField
               label={cfg.name}
-              description={cfg.interface}
+              description={`${cfg.label} · ${cfg.interface}`}
               checked={cfg.active}
               disabled={!!loadingMap[cfg.name]}
               onChange={(val) => handleToggle(cfg.name, val)}
             />
+            {cfg.active && status?.name === cfg.name && <StatusRows status={status} />}
             <div style={{ marginTop: "4px" }}>
               <ButtonItem
                 layout="below"
@@ -441,6 +599,8 @@ function Content() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+
+      <SettingsSection />
 
       <PanelSection title="Диагностика">
         <PanelSectionRow>
