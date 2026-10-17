@@ -17,7 +17,7 @@ import json
 import re
 import zlib
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .defaults import (
     AMNEZIA_FALLBACK_DNS,
@@ -29,6 +29,7 @@ from .defaults import (
 from .errors import ConfigImportError
 from .models import ConfigKind, ImportPlan
 from .singbox import validate_user_singbox, vless_label
+from .subscription import SubscriptionConfig, find_server, is_subscription_url, parse_subscription
 
 # awg-quick runs these through `eval` as root.
 HOOK_KEYS = {"preup": "PreUp", "postup": "PostUp", "predown": "PreDown", "postdown": "PostDown"}
@@ -248,14 +249,35 @@ def _plan_awg(content: str, from_link: bool, mtu_override: Optional[int]) -> Imp
     )
 
 
-def plan_import(text: str, mtu_override: Optional[int] = None) -> ImportPlan:
+def _plan_subscription(url: str, server: Optional[str], fetch: Optional[Callable[[str], str]]) -> ImportPlan:
+    if fetch is None:
+        raise ConfigImportError("Подписки здесь не поддерживаются")
+    servers = parse_subscription(fetch(url))
+    names = tuple(s.name for s in servers)
+    picked = find_server(servers, server) if server else servers[0]
+    if picked is None:
+        raise ConfigImportError(f"Сервера «{server}» нет в подписке")
+    return ImportPlan(
+        kind=ConfigKind.SUBSCRIPTION,
+        content=SubscriptionConfig(url=url, server=picked.name, link=picked.link).dumps(),
+        label=f"Подписка, серверов: {len(servers)}",
+        servers=names,
+    )
+
+
+def plan_import(text: str, mtu_override: Optional[int] = None, server: Optional[str] = None,
+                fetch: Optional[Callable[[str], str]] = None) -> ImportPlan:
     """Detects what `text` is and returns what to store.
 
     The stored content is: the .conf text for AWG, the link itself for VLESS
     (the sing-box config is generated at every start, so template fixes reach
-    old imports), or the normalised JSON for sing-box.
+    old imports), the normalised JSON for sing-box, or the subscription URL
+    with the picked `server` (first one by default) for a subscription.
     """
     stripped = text.strip()
+
+    if is_subscription_url(stripped):
+        return _plan_subscription(stripped, server, fetch)
 
     vless = _single_link(stripped, "vless://")
     if vless:

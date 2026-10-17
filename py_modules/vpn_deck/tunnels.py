@@ -22,8 +22,10 @@ from .config_manager import ConfigManager
 from .models import ConfigKind, OpResult, StoredConfig
 from .service_manager import MANAGED_PREFIX, ServiceManager
 from .settings import Settings
+from .errors import ConfigImportError
 from .singbox import VlessOptions, build_vless_config, is_ip, prepare_user_singbox, vless_server
 from .singbox_manager import SingBoxManager
+from .subscription import Fetcher, SubscriptionConfig, refresh
 
 Resolver = Callable[[str], Optional[str]]
 
@@ -59,19 +61,35 @@ def resolve_ipv4(host: str) -> Optional[str]:
 
 
 class SingBoxBackend:
-    """Runs VLESS links (config generated at every start, so template fixes
-    reach earlier imports) and user sing-box JSON."""
+    """Runs VLESS links and subscriptions (config generated at every start, so
+    template fixes reach earlier imports) and user sing-box JSON."""
 
     def __init__(self, manager: SingBoxManager, configs: ConfigManager, settings: Settings,
-                 resolver: Resolver = resolve_ipv4):
+                 fetch: Fetcher, resolver: Resolver = resolve_ipv4):
         self.manager = manager
         self.configs = configs
         self.settings = settings
+        self.fetch = fetch
         self.resolver = resolver
+
+    def _subscription_link(self, cfg: StoredConfig) -> str:
+        """Server's current link; falls back to the stored one when offline
+        or the subscription changed shape."""
+        stored = SubscriptionConfig.loads(self.configs.read(cfg))
+        try:
+            fresh = refresh(stored, self.fetch)
+        except ConfigImportError as e:
+            decky.logger.warning(f"{cfg.name}: subscription refresh failed, using stored link: {e}")
+            return stored.link
+        if fresh != stored:
+            self.configs.write(cfg.name, fresh.dumps(), ConfigKind.SUBSCRIPTION)
+        return fresh.link
 
     def start(self, cfg: StoredConfig) -> OpResult:
         content = self.configs.read(cfg)
-        if cfg.kind is ConfigKind.VLESS:
+        if cfg.kind is ConfigKind.SUBSCRIPTION:
+            content = self._subscription_link(cfg)
+        if cfg.kind in (ConfigKind.VLESS, ConfigKind.SUBSCRIPTION):
             server = vless_server(content)
             server_ip = None if is_ip(server) else self.resolver(server)
             if not is_ip(server) and server_ip is None:
@@ -148,6 +166,15 @@ class TunnelController:
                 if not stopped.success:
                     decky.logger.warning(f"Stop before delete failed (continuing): {stopped.error}")
             self._forget(cfg)
+
+    def reload(self, name: str) -> Optional[OpResult]:
+        """After a config was re-imported: restart it if it is running, so
+        the new content (e.g. another server) takes effect. None if it's off."""
+        with self.lock:
+            cfg = self.configs.find(name)
+            if cfg is None or cfg.interface not in self.running_interfaces():
+                return None
+            return self.restart(cfg)
 
     # ── background actions ───────────────────────────────────────────
     def restart(self, cfg: StoredConfig) -> OpResult:

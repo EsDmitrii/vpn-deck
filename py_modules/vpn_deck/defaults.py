@@ -20,6 +20,10 @@ MTU_MAX = 1500
 # carries no usable dns1/dns2; we do the same.
 AMNEZIA_FALLBACK_DNS = ("1.1.1.1", "1.0.0.1")
 
+# Panels pick the response format by User-Agent; a v2ray client gets the
+# base64 list of share links.
+SUBSCRIPTION_USER_AGENT = "v2rayN/7.0"
+
 # ── sing-box (VLESS) ────────────────────────────────────────────────
 # DoH server queried *through the proxy*, so local DNS blocking doesn't apply.
 SINGBOX_DNS_SERVER = "1.1.1.1"

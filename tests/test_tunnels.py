@@ -96,6 +96,13 @@ class ControllerTest(unittest.TestCase):
         self.ctl.disconnect("work")  # any user action bumps generation
         self.assertIsNone(self.ctl.ensure_up("home", gen))
 
+    def test_reload_restarts_only_running(self):
+        self.assertIsNone(self.ctl.reload("home"))
+        self.ctl.connect("home")
+        self.log.clear()
+        self.assertTrue(self.ctl.reload("home").success)
+        self.assertEqual(self.log, ["stop vd-home", "start home"])
+
     def test_release_stops_and_forgets(self):
         self.ctl.connect("home")
         self.ctl.release("home")

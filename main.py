@@ -17,6 +17,7 @@ from vpn_deck import (
     ConfigManager,
     Json,
     StoredConfig,
+    SubscriptionConfig,
     Diagnostics,
     NetworkWatcher,
     ServiceManager,
@@ -31,6 +32,7 @@ from vpn_deck import (
     read_import_file,
     read_routes,
     restore_last_active,
+    curl_fetcher,
     to_rpc,
 )
 from vpn_deck.singbox import vless_label
@@ -100,12 +102,14 @@ class Plugin:
         self.runner = d.runner
         self.diagnostics = d.diagnostics
 
-        singbox = SingBoxBackend(d.singbox_manager, d.config_manager, d.settings)
+        self.fetch = curl_fetcher(d.runner)
+        singbox = SingBoxBackend(d.singbox_manager, d.config_manager, d.settings, self.fetch)
         self.controller = TunnelController(
             d.config_manager,
             {ConfigKind.AWG: AwgBackend(d.service_manager),
              ConfigKind.VLESS: singbox,
-             ConfigKind.SINGBOX: singbox},
+             ConfigKind.SINGBOX: singbox,
+             ConfigKind.SUBSCRIPTION: singbox},
             d.settings,
         )
         self.status_probe = StatusProbe(d.runner, d.service_manager)
@@ -180,11 +184,13 @@ class Plugin:
         return self.service_manager.stop_all_interfaces(only_managed)
 
     def _label(self, cfg: StoredConfig) -> str:
-        if cfg.kind is ConfigKind.VLESS:
-            try:
+        try:
+            if cfg.kind is ConfigKind.VLESS:
                 return vless_label(self.config_manager.read(cfg))
-            except (OSError, ConfigImportError):
-                pass
+            if cfg.kind is ConfigKind.SUBSCRIPTION:
+                return f"Подписка · {SubscriptionConfig.loads(self.config_manager.read(cfg)).server}"
+        except (OSError, ValueError, KeyError, ConfigImportError):
+            pass
         return cfg.kind.label
 
     @_rpc
@@ -282,17 +288,24 @@ class Plugin:
         path = _arg(path, "path")
         if not os.path.isfile(path):
             return {"success": False, "error": "Файл не найден"}
-        plan = plan_import(read_import_file(path))
+        plan = await asyncio.to_thread(plan_import, read_import_file(path), fetch=self.fetch)
         return {"success": True, "error": None, "kind": plan.kind.value, "label": plan.label,
-                "mtu": plan.mtu, "mtu_warning": plan.mtu_warning, "warnings": list(plan.warnings)}
+                "mtu": plan.mtu, "mtu_warning": plan.mtu_warning, "warnings": list(plan.warnings),
+                "servers": list(plan.servers)}
 
     @_rpc
-    async def import_vpn_config(self, name: str, path: str = "", mtu: Optional[int] = None) -> Json:
-        decky.logger.info(f"import_vpn_config: name={name}, path={path}, mtu={mtu}")
+    async def import_vpn_config(self, name: str, path: str = "", mtu: Optional[int] = None,
+                                server: Optional[str] = None) -> Json:
+        decky.logger.info(f"import_vpn_config: name={name}, path={path}, mtu={mtu}, server={server}")
         if not os.path.isfile(path):
             return {"success": False, "error": "Файл не найден"}
-        plan = plan_import(read_import_file(path), mtu_override=mtu)
-        self.config_manager.write(name, plan.content, plan.kind)
+        plan = await asyncio.to_thread(plan_import, read_import_file(path), mtu_override=mtu,
+                                       server=server, fetch=self.fetch)
+        cfg = self.config_manager.write(name, plan.content, plan.kind)
+        reloaded = await asyncio.to_thread(self.controller.reload, cfg.name)
+        if reloaded is not None and not reloaded.success:
+            self.record_error("reload", "ServiceError", reloaded.error or "unknown", {"interface": cfg.interface})
+            return {"success": False, "error": f"Конфиг сохранён, но не переподключился: {reloaded.error}"}
         return {"success": True, "error": "", "kind": plan.kind.value, "warnings": list(plan.warnings)}
 
     @_rpc

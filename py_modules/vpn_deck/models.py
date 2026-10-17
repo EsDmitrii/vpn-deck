@@ -18,6 +18,7 @@ class ConfigKind(str, Enum):
     AWG = "awg"
     VLESS = "vless"
     SINGBOX = "singbox"
+    SUBSCRIPTION = "subscription"  # v2ray subscription URL + picked server
 
     @property
     def extension(self) -> str:
@@ -33,11 +34,13 @@ _EXTENSIONS = {
     ConfigKind.AWG: ".conf",
     ConfigKind.VLESS: ".vless",
     ConfigKind.SINGBOX: ".singbox.json",
+    ConfigKind.SUBSCRIPTION: ".subscription",
 }
 _LABELS = {
     ConfigKind.AWG: "AWG",
     ConfigKind.VLESS: "VLESS",
     ConfigKind.SINGBOX: "sing-box",
+    ConfigKind.SUBSCRIPTION: "Подписка",
 }
 
 
@@ -60,6 +63,7 @@ class ImportPlan:
     # True when an AWG config's MTU is absent or above the recommended value.
     mtu_warning: bool = False
     warnings: Tuple[str, ...] = ()
+    servers: Tuple[str, ...] = ()  # subscription: server names to pick from
 
 
 @dataclass(frozen=True)

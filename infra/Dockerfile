@@ -8,7 +8,7 @@ ARG SINGBOX_TAGS=with_gvisor,with_quic,with_utls,badlinkname,tfogo_checklinkname
 
 RUN git clone --depth 1 --branch "${SINGBOX_REF}" https://github.com/SagerNet/sing-box.git /src/sing-box
 WORKDIR /src/sing-box
-RUN CGO_ENABLED=0 GOTOOLCHAIN=auto go build -trimpath -tags "${SINGBOX_TAGS}" \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=auto go build -trimpath -tags "${SINGBOX_TAGS}" \
         -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${SINGBOX_REF#v}' $(cat release/LDFLAGS) -s -w -buildid=" \
         -o /sing-box ./cmd/sing-box
 

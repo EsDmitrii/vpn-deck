@@ -4,6 +4,7 @@ import {
   DialogButton,
   DialogFooter,
   DialogHeader,
+  DropdownItem,
   Field,
   ModalRoot,
   PanelSection,
@@ -32,7 +33,7 @@ interface VPNError {
 }
 
 // Mirrors py_modules/vpn_deck/models.py (ConfigKind, ConnectionStatus, ...).
-type ConfigKind = "awg" | "vless" | "singbox";
+type ConfigKind = "awg" | "vless" | "singbox" | "subscription";
 
 interface ConfigInfo {
   name: string;
@@ -71,6 +72,7 @@ interface ImportInspection extends RpcResult {
   mtu?: number | null;
   mtu_warning?: boolean;
   warnings?: string[];
+  servers?: string[]; // subscription only
 }
 
 interface ImportResult extends RpcResult {
@@ -101,7 +103,9 @@ const vpnStopConfig = callable<[{ config_name: string }], VPNOpResult>(
 );
 const getConnectionStatus = callable<[], ConnectionStatus | null>("get_connection_status");
 const inspectImport = callable<[string], ImportInspection>("inspect_import");
-const importVpnConfig = callable<[string, string, number | null], ImportResult>("import_vpn_config");
+const importVpnConfig = callable<[string, string, number | null, string | null], ImportResult>(
+  "import_vpn_config",
+);
 const getSettings = callable<[], PluginSettings>("get_settings");
 const setSetting = callable<[string, PluginSettings[keyof PluginSettings]], RpcResult>("set_setting");
 const getErrors = callable<[], VPNError[]>("get_errors");
@@ -214,6 +218,7 @@ function ImportConfigModal({
   const [filePath, setFilePath] = useState("");
   const [inspection, setInspection] = useState<ImportInspection | null>(null);
   const [fixMtu, setFixMtu] = useState(true);
+  const [server, setServer] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handlePickFile = async () => {
@@ -228,7 +233,9 @@ function ImportConfigModal({
       );
       setFilePath(res.realpath);
       setName(nameFromFile(res.realpath));
-      setInspection(await inspectImport(res.realpath));
+      const inspected = await inspectImport(res.realpath);
+      setInspection(inspected);
+      setServer(inspected.servers?.[0] ?? null);
     } catch (e) {
       console.error(e);
     }
@@ -244,7 +251,7 @@ function ImportConfigModal({
     const mtu = inspection?.mtu_warning && fixMtu ? RECOMMENDED_AWG_MTU : null;
     setLoading(true);
     try {
-      const result = await importVpnConfig(trimmedName, filePath, mtu);
+      const result = await importVpnConfig(trimmedName, filePath, mtu, server);
       if (!result.success) {
         toaster.toast({ title: "Ошибка импорта", body: result.error ?? "Неизвестная ошибка" });
         return;
@@ -273,7 +280,7 @@ function ImportConfigModal({
           {filePath ? "Выбрать другой файл" : "Выбрать файл"}
         </DialogButton>
         <div style={{ marginTop: "6px", fontSize: "12px", color: "#8b929a" }}>
-          .conf AmneziaWG, ссылка vpn:// или vless:// в .txt/.vpn, JSON sing-box
+          .conf AmneziaWG, ссылка vpn:// или vless:// или URL подписки в .txt, JSON sing-box
         </div>
         {inspection && !inspection.success && (
           <div style={{ marginTop: "12px", fontSize: "13px", color: "#f87171" }}>
@@ -293,6 +300,15 @@ function ImportConfigModal({
                 description="до 12 символов: a-z, 0-9, _ = + . -"
               />
             </div>
+            {(inspection.servers?.length ?? 0) > 0 && (
+              <DropdownItem
+                label="Сервер"
+                description="Ссылка обновляется из подписки при каждом подключении"
+                rgOptions={(inspection.servers ?? []).map((s) => ({ data: s, label: s }))}
+                selectedOption={server}
+                onChange={(opt) => setServer(opt.data)}
+              />
+            )}
             {inspection.mtu_warning && (
               <ToggleField
                 label={`Установить MTU ${RECOMMENDED_AWG_MTU}`}

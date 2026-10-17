@@ -101,6 +101,13 @@ ip netns exec srv sing-box run -c "$CFG/vless-server.json" > "$CFG/vless-server.
 echo "vless://$UUID@vless.test:8443?type=tcp&security=none#tcp" > "$CFG/vless-tcp.txt"
 echo "vless://$UUID@203.0.113.2:8444?type=ws&path=%2Fws%3Fed%3D2048&security=none#ws" > "$CFG/vless-ws.txt"
 
+# v2ray subscription (base64 list of links), served like a panel would.
+mkdir -p "$CFG/sub"
+printf '%s\n%s\n' "$(sed 's/#.*/#Amsterdam TCP/' "$CFG/vless-tcp.txt")" "$(sed 's/#.*/#Frankfurt WS/' "$CFG/vless-ws.txt")" \
+	| base64 -w0 > "$CFG/sub/s"
+echo "http://198.51.100.1:8081/s" > "$CFG/subscription.txt"
+ip netns exec srv python3 -m http.server --bind 198.51.100.1 --directory "$CFG/sub" 8081 >/dev/null 2>&1 &
+
 ip netns exec srv python3 "$WORK/tests/e2e/echo_server.py" 198.51.100.1 8080 &
 sleep 1
 

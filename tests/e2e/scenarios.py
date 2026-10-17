@@ -11,6 +11,7 @@ client address it sees:
 """
 
 import asyncio
+import base64
 import os
 import subprocess
 import time
@@ -189,6 +190,35 @@ class E2E(unittest.TestCase):
     def test_vless_ws_with_early_data(self):
         self.start("vws")
         self.assertEqual(wait_exit(VIA_VLESS), VIA_VLESS)
+
+    def test_subscription_pick_server_and_follow_rotation(self):
+        path = os.path.join(CFG, "subscription.txt")
+        inspected = run(self.plugin.inspect_import(path))
+        self.assertEqual(inspected["servers"], ["Amsterdam TCP", "Frankfurt WS"])
+        self.assertTrue(run(self.plugin.import_vpn_config("sub", path, None, "Frankfurt WS"))["success"])
+        label = {c["name"]: c["label"] for c in run(self.plugin.list_configs_with_status())}["sub"]
+        self.assertEqual(label, "Подписка · Frankfurt WS")
+
+        self.start("sub")
+        self.assertEqual(wait_exit(VIA_VLESS), VIA_VLESS)
+        run(self.plugin.vpn_stop_config("sub"))
+
+        # The panel rotates the server: same name, now the TCP inbound.
+        sub_file = os.path.join(CFG, "sub", "s")
+        with open(sub_file) as f:
+            original = f.read()
+        try:
+            links = base64.b64decode(original).decode().splitlines()
+            rotated = [links[0], links[0].split("#")[0] + "#Frankfurt WS"]
+            with open(sub_file, "w") as f:
+                f.write(base64.b64encode("\n".join(rotated).encode()).decode())
+            self.start("sub")
+            self.assertEqual(wait_exit(VIA_VLESS), VIA_VLESS)
+            stored = run(self.plugin.get_vpn_config("sub"))
+            self.assertIn(":8443?", stored)  # picked up the rotated link
+        finally:
+            with open(sub_file, "w") as f:
+                f.write(original)
 
     # ── switching / lifecycle ───────────────────────────────────────
     def test_switching_between_awg_and_vless(self):
