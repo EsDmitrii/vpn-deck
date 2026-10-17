@@ -8,11 +8,9 @@ import {
   DropdownItem,
   Field,
   ModalRoot,
-  Navigation,
   PanelSection,
   PanelSectionRow,
   showModal,
-  SidebarNavigation,
   staticClasses,
   TextField,
   ToggleField,
@@ -22,10 +20,9 @@ import {
   definePlugin,
   FileSelectionType,
   openFilePicker,
-  routerHook,
   toaster,
 } from "@decky/api";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, ReactNode } from "react";
 import { FaNetworkWired } from "react-icons/fa";
 
 interface VPNError {
@@ -504,13 +501,6 @@ function StatusRows({ status, separator }: { status: ConnectionStatus; separator
   );
 }
 
-const SETTINGS_ROUTE = "/vpn-deck";
-
-function openSettingsPage() {
-  Navigation.Navigate(SETTINGS_ROUTE);
-  Navigation.CloseSideMenus();
-}
-
 function SettingsTab() {
   const [settings, setSettings] = useState<PluginSettings | null>(null);
   const [repairing, setRepairing] = useState(false);
@@ -627,19 +617,35 @@ function ErrorsTab() {
   );
 }
 
-/** Full-screen page (route) opened from the panel. */
-function SettingsPage() {
+/**
+ * Settings and errors open as modals over the panel (not as a Steam route):
+ * B closes a modal back into the Decky panel, a route would go back to the
+ * library instead.
+ */
+function InfoModal({ title, children, closeModal }: { title: string; children: ReactNode; closeModal?: () => void }) {
   return (
-    <div style={{ marginTop: "40px", height: "calc(100% - 40px)" }}>
-      <SidebarNavigation
-        title="VPN Deck"
-        showTitle
-        pages={[
-          { title: "Настройки", content: <SettingsTab />, route: `${SETTINGS_ROUTE}/settings` },
-          { title: "Ошибки", content: <ErrorsTab />, route: `${SETTINGS_ROUTE}/errors` },
-        ]}
-      />
-    </div>
+    <ModalRoot onCancel={closeModal} closeModal={closeModal}>
+      <DialogHeader>{title}</DialogHeader>
+      <DialogBody>{children}</DialogBody>
+      <ModalActions onCancel={closeModal} cancelLabel="Закрыть" />
+    </ModalRoot>
+  );
+}
+
+/** Whole-row link in the panel, like Steam's settings entries. */
+function LinkRow({ label, description, onOpen }: { label: string; description?: string; onOpen: () => void }) {
+  return (
+    <Field
+      label={label}
+      description={description}
+      focusable
+      highlightOnFocus
+      onActivate={onOpen}
+      onClick={onOpen}
+      bottomSeparator="none"
+    >
+      <span style={{ fontSize: "20px", color: "#8b929a" }}>›</span>
+    </Field>
   );
 }
 
@@ -978,17 +984,29 @@ function Content() {
 
       <PanelSection>
         <PanelSectionRow>
-          <Field
-            label="Настройки и ошибки"
-            description={errorCount > 0 ? `Ошибок: ${errorCount}` : undefined}
-            focusable
-            highlightOnFocus
-            onActivate={openSettingsPage}
-            onClick={openSettingsPage}
-            bottomSeparator="none"
-          >
-            <span style={{ fontSize: "20px", color: "#8b929a" }}>›</span>
-          </Field>
+          <LinkRow
+            label="Настройки"
+            onOpen={() =>
+              showModal(
+                <InfoModal title="Настройки">
+                  <SettingsTab />
+                </InfoModal>,
+              )
+            }
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <LinkRow
+            label="Ошибки"
+            description={errorCount > 0 ? `Ошибок: ${errorCount}` : "Нет"}
+            onOpen={() =>
+              showModal(
+                <InfoModal title="Ошибки">
+                  <ErrorsTab />
+                </InfoModal>,
+              )
+            }
+          />
         </PanelSectionRow>
       </PanelSection>
     </>
@@ -997,7 +1015,6 @@ function Content() {
 
 export default definePlugin(() => {
   console.log("VPN Deck plugin initializing");
-  routerHook.addRoute(SETTINGS_ROUTE, SettingsPage, { exact: false });
 
   return {
     name: "VPN Deck",
@@ -1006,7 +1023,6 @@ export default definePlugin(() => {
     icon: <FaNetworkWired />,
     onDismount() {
       console.log("VPN Deck plugin unloading");
-      routerHook.removeRoute(SETTINGS_ROUTE);
     },
   };
 });
