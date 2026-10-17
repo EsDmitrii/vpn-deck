@@ -437,22 +437,32 @@ function ImportConfigModal({
   );
 }
 
-function StatusRows({ status }: { status: ConnectionStatus }) {
+/**
+ * A config and the rows under it render as one group: only the group's last
+ * element draws the separator line (Decky draws one under every field).
+ */
+type Separator = "none" | "standard";
+
+function StatusRows({ status, separator }: { status: ConnectionStatus; separator: Separator }) {
   const exit = status.exit
     ? `${countryFlag(status.exit.country)} ${status.exit.ip}`.trim()
     : "проверяется…";
+  const rows: [string, string][] = [["Выход в интернет", exit]];
+  if (status.addresses.length > 0) rows.push(["Адрес в VPN", status.addresses[0]]);
+  rows.push(["Скорость", `↓ ${formatSpeed(status.rx_bytes_per_sec)} ↑ ${formatSpeed(status.tx_bytes_per_sec)}`]);
+  if (status.kind === "awg") rows.push(["Handshake", formatAgo(status.latest_handshake)]);
   return (
     <>
-      <Field label="Выход в интернет" padding="compact">{exit}</Field>
-      {status.addresses.length > 0 && (
-        <Field label="Адрес в VPN" padding="compact">{status.addresses[0]}</Field>
-      )}
-      <Field label="Скорость" padding="compact">
-        ↓ {formatSpeed(status.rx_bytes_per_sec)} ↑ {formatSpeed(status.tx_bytes_per_sec)}
-      </Field>
-      {status.kind === "awg" && (
-        <Field label="Handshake" padding="compact">{formatAgo(status.latest_handshake)}</Field>
-      )}
+      {rows.map(([label, value], i) => (
+        <Field
+          key={label}
+          label={label}
+          padding="compact"
+          bottomSeparator={i === rows.length - 1 ? separator : "none"}
+        >
+          {value}
+        </Field>
+      ))}
     </>
   );
 }
@@ -616,7 +626,15 @@ function ServerPickerModal({
 }
 
 /** "Server: X" row under a subscription; opens ServerPickerModal. */
-function SubscriptionServerButton({ cfg, onChanged }: { cfg: ConfigInfo; onChanged: () => void }) {
+function SubscriptionServerButton({
+  cfg,
+  onChanged,
+  separator,
+}: {
+  cfg: ConfigInfo;
+  onChanged: () => void;
+  separator: Separator;
+}) {
   const load = async () => {
     const res = await getSubscriptionServers(cfg.name);
     if (!res.success || !res.servers) throw new Error(res.error ?? "Не удалось загрузить серверы");
@@ -630,10 +648,13 @@ function SubscriptionServerButton({ cfg, onChanged }: { cfg: ConfigInfo; onChang
   };
   return (
     <ButtonItem
-      layout="below"
+      layout="inline"
+      label="Сервер"
+      description={cfg.server ?? "—"}
+      bottomSeparator={separator}
       onClick={() => showModal(<ServerPickerModal load={load} current={cfg.server} onPick={pick} />)}
     >
-      Сервер: {cfg.server ?? "—"}
+      Сменить
     </ButtonItem>
   );
 }
@@ -767,19 +788,30 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {configs.map((cfg) => (
-          <PanelSectionRow key={cfg.interface}>
-            <ToggleField
-              label={cfg.name}
-              description={cfg.label}
-              checked={cfg.active}
-              disabled={!!loadingMap[cfg.name]}
-              onChange={(val) => handleToggle(cfg.name, val)}
-            />
-            {cfg.kind === "subscription" && <SubscriptionServerButton cfg={cfg} onChanged={refreshConfigs} />}
-            {cfg.active && status?.name === cfg.name && <StatusRows status={status} />}
-          </PanelSectionRow>
-        ))}
+        {configs.map((cfg) => {
+          const isSub = cfg.kind === "subscription";
+          const showStatus = cfg.active && status?.name === cfg.name;
+          return (
+            <PanelSectionRow key={cfg.interface}>
+              <ToggleField
+                label={cfg.name}
+                description={isSub ? "Подписка" : cfg.label}
+                checked={cfg.active}
+                disabled={!!loadingMap[cfg.name]}
+                onChange={(val) => handleToggle(cfg.name, val)}
+                bottomSeparator={isSub || showStatus ? "none" : "standard"}
+              />
+              {isSub && (
+                <SubscriptionServerButton
+                  cfg={cfg}
+                  onChanged={refreshConfigs}
+                  separator={showStatus ? "none" : "standard"}
+                />
+              )}
+              {showStatus && status && <StatusRows status={status} separator="standard" />}
+            </PanelSectionRow>
+          );
+        })}
         <PanelSectionRow>
           <ButtonItem
             layout="below"
