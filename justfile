@@ -9,14 +9,29 @@ default:
 install:
     pnpm install
 
-# Run unit tests (no binaries required)
+# Unit tests (no root, no binaries)
 test:
-    PYTHONPATH=py_modules python3 test_unit.py
-    PYTHONPATH=py_modules python3 test_simple.py
+    python3 -m unittest discover -s tests -t .
 
-# Run smoke tests inside a Steam Deck OS container (holo-base)
-test-smoke:
+# Unit tests inside a Steam Deck OS container (holo-base, its Python)
+test-holo:
     bash infra/test-smoke.sh
+
+# End-to-end: real awg-quick / amneziawg-go / sing-box in a privileged container
+test-e2e: build-image-local
+    bash infra/test-e2e.sh
+
+# Type checks: Python (pyright strict) and TypeScript
+typecheck:
+    pyright
+    pnpm exec tsc --noEmit
+
+# Everything CI runs
+check: typecheck test test-e2e
+
+# Build the builder image locally (used by e2e and build-binaries)
+build-image-local:
+    docker build --platform linux/amd64 -t vpn-deck-builder:local -f infra/Dockerfile .
 
 # Build the builder Docker image
 build-image:
@@ -26,7 +41,7 @@ build-image:
 push-image: build-image
     docker push {{ image }}:{{ tag }}
 
-# Extract AmneziaWG binaries from Docker image to ./binaries/
+# Extract AmneziaWG and sing-box binaries from Docker image to ./bin/
 build-binaries:
     bash infra/extract-binaries.sh
 

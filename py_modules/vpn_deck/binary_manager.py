@@ -17,10 +17,10 @@ class BinaryManager:
         """Initialize BinaryManager"""
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.bin_dir = os.path.join(self.plugin_dir, "..", "..", "bin")
-        self.binary_cache: Optional[Dict[str, str]] = None
+        self.binary_cache: Optional[Dict[str, Optional[str]]] = None
 
         # Binary names we're looking for
-        self.binary_names = ["amneziawg-go", "awg", "awg-quick"]
+        self.binary_names = ["amneziawg-go", "awg", "awg-quick", "sing-box"]
     
     def detect_binaries(self) -> Dict[str, Optional[str]]:
         """

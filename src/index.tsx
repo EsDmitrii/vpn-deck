@@ -2,8 +2,11 @@ import {
   ButtonItem,
   DialogBody,
   DialogButton,
+  DialogButtonPrimary,
   DialogFooter,
   DialogHeader,
+  DropdownItem,
+  Field,
   ModalRoot,
   PanelSection,
   PanelSectionRow,
@@ -13,14 +16,13 @@ import {
   ToggleField,
 } from "@decky/ui";
 import {
-  call,
   callable,
   definePlugin,
   FileSelectionType,
   openFilePicker,
   toaster,
 } from "@decky/api";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, ReactNode } from "react";
 import { FaNetworkWired } from "react-icons/fa";
 
 interface VPNError {
@@ -31,11 +33,59 @@ interface VPNError {
   details: Record<string, any>;
 }
 
+// Mirrors py_modules/vpn_deck/models.py (ConfigKind, ConnectionStatus, ...).
+type ConfigKind = "awg" | "vless" | "singbox" | "subscription";
+
 interface ConfigInfo {
   name: string;
+  kind: ConfigKind;
+  label: string; // e.g. "AWG", "VLESS REALITY"
   interface: string;
   active: boolean;
   managed_by: string;
+  server: string | null; // subscription: picked server
+}
+
+interface ExitInfo {
+  ip: string;
+  country: string | null;
+  checked_at: number;
+}
+
+interface ConnectionStatus {
+  name: string;
+  kind: ConfigKind;
+  interface: string;
+  addresses: string[];
+  latest_handshake: number | null; // unix time, AWG only
+  rx_bytes_per_sec: number | null;
+  tx_bytes_per_sec: number | null;
+  exit: ExitInfo | null;
+}
+
+interface RpcResult {
+  success: boolean;
+  error: string | null;
+}
+
+interface ImportInspection extends RpcResult {
+  kind?: ConfigKind;
+  label?: string;
+  mtu?: number | null;
+  mtu_warning?: boolean;
+  warnings?: string[];
+  servers?: string[]; // subscription only
+}
+
+interface ImportResult extends RpcResult {
+  kind?: ConfigKind;
+  warnings?: string[];
+}
+
+interface PluginSettings {
+  restore_on_boot: boolean;
+  vless_dns_server: string;
+  vless_ipv4_only: boolean;
 }
 
 interface VPNOpResult {
@@ -53,6 +103,19 @@ const vpnStartConfig = callable<[{ config_name: string }], VPNOpResult>(
 const vpnStopConfig = callable<[{ config_name: string }], VPNOpResult>(
   "vpn_stop_config",
 );
+const getConnectionStatus = callable<[], ConnectionStatus | null>("get_connection_status");
+const inspectImport = callable<[string], ImportInspection>("inspect_import");
+const inspectText = callable<[string], ImportInspection>("inspect_text");
+const importText = callable<[string, string, number | null, string | null], ImportResult>("import_text");
+const importVpnConfig = callable<[string, string, number | null, string | null], ImportResult>(
+  "import_vpn_config",
+);
+const getSubscriptionServers = callable<[string], RpcResult & { servers?: string[] }>(
+  "get_subscription_servers",
+);
+const setSubscriptionServer = callable<[string, string], RpcResult>("set_subscription_server");
+const getSettings = callable<[], PluginSettings>("get_settings");
+const setSetting = callable<[string, PluginSettings[keyof PluginSettings]], RpcResult>("set_setting");
 const getErrors = callable<[], VPNError[]>("get_errors");
 const clearErrors = callable<[], boolean>("clear_errors");
 
@@ -81,7 +144,7 @@ const repairSymlinks = callable<[], SymlinkRepairResult>("repair_symlinks");
 
 interface DiagnosticsProbe {
   name: string;
-  kind: "ping" | "http";
+  kind: "ping" | "http" | "trace";
   target: string;
   ok: boolean;
   detail: string;
@@ -93,9 +156,102 @@ const diagnoseConnectivity = callable<[], DiagnosticsProbe[]>("diagnose_connecti
 const CONFIG_NAME_MAX_LEN = 12; // 3 (префикс "vd-") + 12 = 15
 const CONFIG_NAME_REGEX = /^[a-zA-Z0-9_=+.-]+$/;
 
+const STACK = { display: "flex", flexDirection: "column", gap: "12px" } as const;
+const TEXT = { fontSize: "13px" } as const;
+const HINT = { marginTop: "6px", fontSize: "12px", color: "#8b929a" } as const;
+const COLOR_ERROR = "#f87171";
+const COLOR_WARNING = "#fbbf24";
+
+/**
+ * Modal footer with buttons in a row, primary action first (as in Steam's own
+ * dialogs). DialogFooter alone stacks full-width buttons with no gap.
+ */
+function ModalActions({
+  primary,
+  onPrimary,
+  primaryDisabled,
+  onCancel,
+  cancelLabel = "Отмена",
+}: {
+  primary?: string;
+  onPrimary?: () => void;
+  primaryDisabled?: boolean;
+  onCancel?: () => void;
+  cancelLabel?: string;
+}) {
+  return (
+    <DialogFooter>
+      <div style={{ display: "flex", gap: "8px" }}>
+        {primary && (
+          <DialogButtonPrimary style={{ flex: 1 }} onClick={onPrimary} disabled={primaryDisabled}>
+            {primary}
+          </DialogButtonPrimary>
+        )}
+        <DialogButton style={{ flex: 1 }} onClick={onCancel}>
+          {cancelLabel}
+        </DialogButton>
+      </div>
+    </DialogFooter>
+  );
+}
+
+const RECOMMENDED_AWG_MTU = 1280; // keep in sync with defaults.RECOMMENDED_AWG_MTU
+const IMPORT_EXTENSIONS = ["conf", "txt", "vpn", "json"];
+
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
+
+function formatSpeed(bytesPerSec: number | null): string {
+  if (bytesPerSec === null) return "—";
+  const units = ["Б/с", "КБ/с", "МБ/с", "ГБ/с"];
+  let value = bytesPerSec;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatAgo(unixTime: number | null): string {
+  if (unixTime === null) return "ещё не было";
+  const sec = Math.max(0, Math.round(Date.now() / 1000 - unixTime));
+  if (sec < 60) return `${sec} с назад`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} мин назад`;
+  return `${Math.floor(sec / 3600)} ч назад`;
+}
+
+/** "NL" -> 🇳🇱 */
+function countryFlag(code: string | null): string {
+  if (!code || !/^[A-Z]{2}$/.test(code)) return "";
+  return String.fromCodePoint(...[...code].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+/** Config name suggested from a file name: extension dropped, cut to the limit. */
+function nameFromFile(path: string): string {
+  const base = path.split("/").pop() ?? "";
+  return base.replace(/\.(conf|txt|vpn|json)$/i, "").slice(0, CONFIG_NAME_MAX_LEN);
+}
+
+const DEFAULT_NAMES: Record<ConfigKind, string> = {
+  awg: "awg",
+  vless: "vless",
+  singbox: "singbox",
+  subscription: "sub",
+};
+
+/** `base`, or `base2`, `base3`… if taken. */
+function uniqueName(base: string, taken: string[]): string {
+  if (!taken.includes(base)) return base;
+  for (let i = 2; ; i++) {
+    const candidate = `${base.slice(0, CONFIG_NAME_MAX_LEN - String(i).length)}${i}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
+/** Where the config comes from: text in the field, or a picked file. */
+type ImportSource = { kind: "text"; text: string } | { kind: "file"; path: string };
 
 function validateConfigName(name: string): { valid: boolean; error?: string } {
   const trimmed = name.trim();
@@ -118,16 +274,53 @@ function validateConfigName(name: string): { valid: boolean; error?: string } {
 }
 
 function ImportConfigModal({
+  existingNames,
   closeModal,
   onSuccess,
 }: {
+  existingNames: string[];
   closeModal?: () => void;
   onSuccess: () => void;
 }) {
+  const [text, setText] = useState("");
+  const [source, setSource] = useState<ImportSource | null>(null);
   const [name, setName] = useState("");
-  const [filePath, setFilePath] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
+  const [inspection, setInspection] = useState<ImportInspection | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [fixMtu, setFixMtu] = useState(true);
+  const [server, setServer] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
+
+  const applyInspection = (inspected: ImportInspection, suggested: string) => {
+    setInspection(inspected);
+    setServer(inspected.servers?.[0] ?? null);
+    if (!nameTouched) setName(uniqueName(suggested, existingNames));
+  };
+
+  // Typed/pasted text is checked once the user stops typing.
+  useEffect(() => {
+    if (source?.kind === "file" || !text.trim()) {
+      if (source?.kind !== "file") setInspection(null);
+      return;
+    }
+    let cancelled = false; // a newer edit superseded this check
+    const timer = setTimeout(async () => {
+      setChecking(true);
+      try {
+        const inspected = await inspectText(text);
+        if (cancelled) return;
+        setSource({ kind: "text", text });
+        applyInspection(inspected, DEFAULT_NAMES[inspected.kind ?? "awg"]);
+      } finally {
+        if (!cancelled) setChecking(false);
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [text]);
 
   const handlePickFile = async () => {
     try {
@@ -137,106 +330,337 @@ function ImportConfigModal({
         true,
         true,
         undefined,
-        ["conf"],
+        IMPORT_EXTENSIONS,
       );
-      const filename =
-        res.realpath
-          .split("/")
-          .pop()
-          ?.replace(/\.conf$/, "") ?? "";
-      setFilePath(res.realpath);
-      setName(filename);
-      setStatus(res.realpath.split("/").pop() ?? "");
+      setText("");
+      setSource({ kind: "file", path: res.realpath });
+      setChecking(true);
+      applyInspection(await inspectImport(res.realpath), nameFromFile(res.realpath));
     } catch (e) {
       console.error(e);
+    } finally {
+      setChecking(false);
     }
   };
 
   const handleImport = async () => {
-
+    if (!source) return;
+    const validation = validateConfigName(name);
+    if (!validation.valid) {
+      toaster.toast({ title: "Ошибка", body: validation.error ?? "Неверное имя конфига" });
+      return;
+    }
+    const trimmedName = name.trim();
+    const mtu = inspection?.mtu_warning && fixMtu ? RECOMMENDED_AWG_MTU : null;
+    setLoading(true);
     try {
-      const validation = validateConfigName(name);
-      if (!validation.valid) {
-        toaster.toast({ title: "Ошибка", body: validation.error ?? "Неверное имя конфига" });
+      const result =
+        source.kind === "text"
+          ? await importText(trimmedName, source.text, mtu, server)
+          : await importVpnConfig(trimmedName, source.path, mtu, server);
+      if (!result.success) {
+        toaster.toast({ title: "Ошибка импорта", body: result.error ?? "Неизвестная ошибка" });
         return;
       }
-      const trimmedName = name.trim();
-
-      setLoading(true);
-      setStatus("Импорт конфига...");
-
-      const result = await call<
-        [string, string],
-        { success: boolean; error: string }
-      >("import_vpn_config", trimmedName, filePath);
-      if (result.success) {
-        setStatus("Конфиг сохранён");
-        toaster.toast({ title: "Конфиг импортирован", body: trimmedName });
-        onSuccess();
-        closeModal?.();
-      } else {
-        setStatus("");
-        toaster.toast({
-          title: "Ошибка импорта",
-          body: result.error ?? "Неизвестная ошибка",
-        });
+      toaster.toast({ title: "Конфиг импортирован", body: trimmedName });
+      for (const warning of result.warnings ?? []) {
+        toaster.toast({ title: "Внимание", body: warning });
       }
+      onSuccess();
+      closeModal?.();
     } catch (e) {
-      setStatus("");
       toaster.toast({ title: "Ошибка", body: String(e) });
     } finally {
       setLoading(false);
     }
   };
 
+  const sourceName = source?.kind === "file" ? source.path.split("/").pop() : "Ссылка";
+  const canImport = !loading && !checking && !!inspection?.success;
+
   return (
     <ModalRoot onCancel={closeModal} closeModal={closeModal}>
       <DialogHeader>Импорт конфига</DialogHeader>
       <DialogBody>
-        <DialogButton onClick={handlePickFile} disabled={loading}>
-          {filePath ? "Выбрать другой файл" : "Выбрать файл .conf"}
-        </DialogButton>
-        {filePath && (
-          <div style={{ marginTop: "12px" }}>
-            <TextField
-              label="Имя конфига"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              description="до 12 символов: a-z, 0-9, _ = + . -"
-            />
+        <div style={STACK}>
+          <TextField
+            label="Ссылка или URL подписки"
+            description="vpn://, vless://, https://… подписки или JSON sing-box"
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              if (source?.kind === "file") setSource(null);
+            }}
+            disabled={loading}
+          />
+          <div>
+            <DialogButton onClick={handlePickFile} disabled={loading}>
+              {source?.kind === "file" ? "Выбрать другой файл" : "…или выбрать файл"}
+            </DialogButton>
+            <div style={HINT}>.conf, .txt со ссылкой, .json — например из «Загрузок»</div>
           </div>
-        )}
-        {status && (
-          <div style={{ marginTop: "8px", fontSize: "12px", color: "#8b929a" }}>
-            {status}
-          </div>
-        )}
+          {checking && <div style={HINT}>Проверка…</div>}
+          {inspection && !inspection.success && (
+            <div style={{ ...TEXT, color: COLOR_ERROR }}>
+              {sourceName}: {inspection.error}
+            </div>
+          )}
+          {inspection?.success && (
+            <>
+              <div style={TEXT}>
+                {sourceName} — {inspection.label}
+              </div>
+              <TextField
+                label="Имя конфига"
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setNameTouched(true);
+                }}
+                description="до 12 символов: a-z, 0-9, _ = + . -"
+              />
+              {(inspection.servers?.length ?? 0) > 0 && (
+                <ButtonItem
+                  layout="below"
+                  description="Потом можно сменить в списке конфигов"
+                  onClick={() =>
+                    showModal(
+                      <ServerPickerModal
+                        load={async () => inspection.servers ?? []}
+                        current={server}
+                        onPick={async (s) => {
+                          setServer(s);
+                          return true;
+                        }}
+                      />,
+                    )
+                  }
+                >
+                  Сервер: {server ?? "—"}
+                </ButtonItem>
+              )}
+              {inspection.mtu_warning && (
+                <ToggleField
+                  label={`Установить MTU ${RECOMMENDED_AWG_MTU}`}
+                  description={
+                    inspection.mtu
+                      ? `Сейчас MTU ${inspection.mtu}, для AWG это часто слишком много`
+                      : "MTU не задан (будет ~1420), для AWG это часто слишком много"
+                  }
+                  checked={fixMtu}
+                  onChange={setFixMtu}
+                  bottomSeparator="none"
+                />
+              )}
+              {(inspection.warnings ?? []).map((w) => (
+                <div key={w} style={{ ...HINT, color: COLOR_WARNING }}>
+                  ⚠ {w}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
       </DialogBody>
-      <DialogFooter>
-        <DialogButton
-          onClick={handleImport}
-          disabled={
-            loading
-          }
-        >
-          {loading ? "Импорт..." : "Импортировать"}
-        </DialogButton>
-        <DialogButton onClick={closeModal}>Отмена</DialogButton>
-      </DialogFooter>
+      <ModalActions
+        primary={loading ? "Импорт…" : "Импортировать"}
+        onPrimary={handleImport}
+        primaryDisabled={!canImport}
+        onCancel={closeModal}
+      />
     </ModalRoot>
   );
 }
 
+/**
+ * A config and the rows under it render as one group: only the group's last
+ * element draws the separator line (Decky draws one under every field).
+ */
+type Separator = "none" | "standard";
+
+function StatusRows({ status, separator }: { status: ConnectionStatus; separator: Separator }) {
+  const exit = status.exit
+    ? `${countryFlag(status.exit.country)} ${status.exit.ip}`.trim()
+    : "проверяется…";
+  const rows: [string, string][] = [["Выход в интернет", exit]];
+  if (status.addresses.length > 0) rows.push(["Адрес в VPN", status.addresses[0]]);
+  rows.push(["Скорость", `↓ ${formatSpeed(status.rx_bytes_per_sec)} ↑ ${formatSpeed(status.tx_bytes_per_sec)}`]);
+  if (status.kind === "awg") rows.push(["Handshake", formatAgo(status.latest_handshake)]);
+  return (
+    <>
+      {rows.map(([label, value], i) => (
+        <Field
+          key={label}
+          label={label}
+          padding="compact"
+          bottomSeparator={i === rows.length - 1 ? separator : "none"}
+        >
+          {value}
+        </Field>
+      ))}
+    </>
+  );
+}
+
+function SettingsTab() {
+  const [settings, setSettings] = useState<PluginSettings | null>(null);
+  const [repairing, setRepairing] = useState(false);
+
+  useEffect(() => {
+    getSettings().then(setSettings).catch((e) => console.error("Failed to load settings:", e));
+  }, []);
+
+  const update = async <K extends keyof PluginSettings>(key: K, value: PluginSettings[K]) => {
+    const res = await setSetting(key, value);
+    if (!res.success) {
+      toaster.toast({ title: "Ошибка", body: res.error ?? "Не удалось сохранить" });
+      return;
+    }
+    setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  const repair = async () => {
+    setRepairing(true);
+    try {
+      const res = await repairSymlinks();
+      toaster.toast({ title: "Симлинки", body: `Восстановлено ${res.repaired} из ${res.total}` });
+    } catch (e) {
+      toaster.toast({ title: "Ошибка восстановления", body: String(e) });
+    } finally {
+      setRepairing(false);
+    }
+  };
+
+  if (!settings) return null;
+  return (
+    <>
+      <ToggleField
+        label="Подключать после перезагрузки"
+        description="Включить конфиг, который был включён до выключения Deck"
+        checked={settings.restore_on_boot}
+        onChange={(v) => update("restore_on_boot", v)}
+      />
+      <ToggleField
+        label="VLESS: только IPv4"
+        description={`DNS ${settings.vless_dns_server} через прокси. Выключите, если сервер умеет IPv6`}
+        checked={settings.vless_ipv4_only}
+        onChange={(v) => update("vless_ipv4_only", v)}
+      />
+      <ButtonItem
+        layout="inline"
+        label="Восстановить симлинки AWG"
+        description="Если после обновления SteamOS конфиги AWG перестали включаться"
+        disabled={repairing}
+        onClick={repair}
+      >
+        {repairing ? "Восстановление…" : "Восстановить"}
+      </ButtonItem>
+    </>
+  );
+}
+
+function ErrorsTab() {
+  const [errors, setErrors] = useState<VPNError[] | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setErrors(await getErrors());
+    } catch (e) {
+      console.error("Failed to load errors:", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const clear = async () => {
+    await clearErrors();
+    setErrors([]);
+    toaster.toast({ title: "История ошибок очищена", body: "" });
+  };
+
+  if (errors === null) return null;
+  if (errors.length === 0) return <div style={{ ...TEXT, color: "#8b929a" }}>Ошибок нет</div>;
+  return (
+    <>
+      <ButtonItem layout="inline" label={`Ошибок: ${errors.length}`} onClick={clear}>
+        Очистить
+      </ButtonItem>
+      {errors
+        .slice()
+        .reverse()
+        .map((error) => (
+          <div
+            key={`${error.timestamp}-${error.operation}`}
+            style={{
+              padding: "12px",
+              marginTop: "8px",
+              backgroundColor: "rgba(255, 0, 0, 0.1)",
+              borderRadius: "4px",
+              fontSize: "13px",
+            }}
+          >
+            <div style={{ fontWeight: "bold" }}>
+              {formatTimestamp(error.timestamp)} · {error.operation} · {error.error_type}
+            </div>
+            <div style={{ marginTop: "4px", whiteSpace: "pre-wrap" }}>{error.message}</div>
+            {Object.keys(error.details).length > 0 && (
+              <pre style={{ marginTop: "8px", fontSize: "11px", whiteSpace: "pre-wrap", color: "#8b929a" }}>
+                {JSON.stringify(error.details, null, 2)}
+              </pre>
+            )}
+          </div>
+        ))}
+    </>
+  );
+}
+
+/**
+ * Settings and errors open as modals over the panel (not as a Steam route):
+ * B closes a modal back into the Decky panel, a route would go back to the
+ * library instead.
+ */
+function InfoModal({ title, children, closeModal }: { title: string; children: ReactNode; closeModal?: () => void }) {
+  return (
+    <ModalRoot onCancel={closeModal} closeModal={closeModal}>
+      <DialogHeader>{title}</DialogHeader>
+      <DialogBody>{children}</DialogBody>
+      <ModalActions onCancel={closeModal} cancelLabel="Закрыть" />
+    </ModalRoot>
+  );
+}
+
+/** Whole-row link in the panel, like Steam's settings entries. */
+function LinkRow({ label, description, onOpen }: { label: string; description?: string; onOpen: () => void }) {
+  return (
+    <Field
+      label={label}
+      description={description}
+      focusable
+      highlightOnFocus
+      onActivate={onOpen}
+      onClick={onOpen}
+      bottomSeparator="none"
+    >
+      <span style={{ fontSize: "20px", color: "#8b929a" }}>›</span>
+    </Field>
+  );
+}
+
 function DeleteConfigModal({
-  configName,
+  configs,
   closeModal,
   onSuccess,
 }: {
-  configName: string;
+  configs: ConfigInfo[];
   closeModal?: () => void;
   onSuccess: () => void;
 }) {
+  const [configName, setConfigName] = useState(configs[0]?.name ?? "");
   const [loading, setLoading] = useState(false);
+  const active = configs.find((c) => c.name === configName)?.active;
 
   const handleDelete = async () => {
     try {
@@ -247,10 +671,7 @@ function DeleteConfigModal({
         onSuccess();
         closeModal?.();
       } else {
-        toaster.toast({
-          title: "Ошибка удаления",
-          body: result.error ?? "Неизвестная ошибка",
-        });
+        toaster.toast({ title: "Ошибка удаления", body: result.error ?? "Неизвестная ошибка" });
       }
     } catch (e) {
       toaster.toast({ title: "Ошибка", body: String(e) });
@@ -263,33 +684,139 @@ function DeleteConfigModal({
     <ModalRoot onCancel={closeModal} closeModal={closeModal}>
       <DialogHeader>Удалить конфиг</DialogHeader>
       <DialogBody>
-        <div style={{ fontSize: "14px" }}>
-          Удалить конфиг «{configName}»? Интерфейс будет остановлен.
+        <div style={STACK}>
+          <DropdownItem
+            label="Конфиг"
+            rgOptions={configs.map((c) => ({ data: c.name, label: `${c.name} (${c.label})` }))}
+            selectedOption={configName}
+            onChange={(opt) => setConfigName(opt.data)}
+            bottomSeparator="none"
+          />
+          {active && <div style={TEXT}>Этот конфиг сейчас включён, VPN отключится.</div>}
         </div>
       </DialogBody>
-      <DialogFooter>
-        <DialogButton onClick={handleDelete} disabled={loading}>
-          {loading ? "Удаление…" : "Удалить"}
-        </DialogButton>
-        <DialogButton onClick={closeModal}>Отмена</DialogButton>
-      </DialogFooter>
+      <ModalActions
+        primary={loading ? "Удаление…" : "Удалить"}
+        onPrimary={handleDelete}
+        primaryDisabled={loading || !configName}
+        onCancel={closeModal}
+      />
     </ModalRoot>
+  );
+}
+
+/** Full-size list of subscription servers; picking one applies it and closes. */
+function ServerPickerModal({
+  load,
+  current,
+  onPick,
+  closeModal,
+}: {
+  load: () => Promise<string[]>;
+  current: string | null;
+  onPick: (server: string) => Promise<boolean>;
+  closeModal?: () => void;
+}) {
+  const [servers, setServers] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    load()
+      .then(setServers)
+      .catch((e) => setError(String(e)));
+  }, []);
+
+  const pick = async (server: string) => {
+    if (server === current) {
+      closeModal?.();
+      return;
+    }
+    setBusy(true);
+    try {
+      if (await onPick(server)) closeModal?.();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <ModalRoot onCancel={closeModal} closeModal={closeModal}>
+      <DialogHeader>Сервер подписки</DialogHeader>
+      <DialogBody>
+        {servers === null && !error && <div style={TEXT}>Загрузка списка серверов…</div>}
+        {error && <div style={{ ...TEXT, color: COLOR_ERROR }}>{error}</div>}
+        {servers && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+            {servers.map((s) => (
+              <DialogButton
+                key={s}
+                disabled={busy}
+                onClick={() => pick(s)}
+                style={{ textAlign: "left", fontWeight: s === current ? "bold" : undefined }}
+              >
+                {s === current ? `✓ ${s}` : s}
+              </DialogButton>
+            ))}
+          </div>
+        )}
+      </DialogBody>
+      <ModalActions onCancel={closeModal} cancelLabel="Закрыть" />
+    </ModalRoot>
+  );
+}
+
+/** "Server: X" row under a subscription; opens ServerPickerModal. */
+function SubscriptionServerButton({
+  cfg,
+  onChanged,
+  separator,
+}: {
+  cfg: ConfigInfo;
+  onChanged: () => void;
+  separator: Separator;
+}) {
+  const load = async () => {
+    const res = await getSubscriptionServers(cfg.name);
+    if (!res.success || !res.servers) throw new Error(res.error ?? "Не удалось загрузить серверы");
+    return res.servers;
+  };
+  const pick = async (server: string) => {
+    const res = await setSubscriptionServer(cfg.name, server);
+    toaster.toast(res.success ? { title: "Сервер сменён", body: server } : { title: "Ошибка", body: res.error ?? "" });
+    onChanged();
+    return res.success;
+  };
+  const open = () => showModal(<ServerPickerModal load={load} current={cfg.server} onPick={pick} />);
+  // A whole-row link like Steam's settings entries, not a big button.
+  return (
+    <Field
+      label="Сервер"
+      description={cfg.server ?? "—"}
+      bottomSeparator={separator}
+      focusable
+      highlightOnFocus
+      onActivate={open}
+      onClick={open}
+    >
+      <span style={{ fontSize: "20px", color: "#8b929a" }}>›</span>
+    </Field>
   );
 }
 
 function Content() {
   const [configs, setConfigs] = useState<ConfigInfo[]>([]);
+  const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
-  const [errors, setErrors] = useState<VPNError[]>([]);
-  const [showErrors, setShowErrors] = useState<boolean>(false);
+  const [errorCount, setErrorCount] = useState(0);
   const [probes, setProbes] = useState<DiagnosticsProbe[] | null>(null);
   const [probesLoading, setProbesLoading] = useState<boolean>(false);
-  const [repairLoading, setRepairLoading] = useState<boolean>(false);
 
   const refreshConfigs = useCallback(async () => {
     try {
       const result = await listConfigsWithStatus();
       setConfigs(result);
+      setStatus(result.some((c) => c.active) ? await getConnectionStatus() : null);
     } catch (error) {
       console.error("Failed to refresh configs:", error);
     }
@@ -297,8 +824,7 @@ function Content() {
 
   const loadErrors = useCallback(async () => {
     try {
-      const errorList = await getErrors();
-      setErrors(errorList);
+      setErrorCount((await getErrors()).length);
     } catch (error) {
       console.error("Failed to load errors:", error);
     }
@@ -355,32 +881,6 @@ function Content() {
     }
   }, []);
 
-  const handleRepairSymlinks = useCallback(async () => {
-    setRepairLoading(true);
-    try {
-      const res = await repairSymlinks();
-      toaster.toast({
-        title: "Симлинки",
-        body: `Восстановлено ${res.repaired} из ${res.total}`,
-      });
-      await refreshConfigs();
-    } catch (e) {
-      toaster.toast({ title: "Ошибка восстановления", body: String(e) });
-    } finally {
-      setRepairLoading(false);
-    }
-  }, [refreshConfigs]);
-
-  const handleClearErrors = useCallback(async () => {
-    try {
-      await clearErrors();
-      setErrors([]);
-      toaster.toast({ title: "История ошибок очищена", body: "" });
-    } catch (error) {
-      toaster.toast({ title: "Ошибка очистки", body: String(error) });
-    }
-  }, []);
-
   useEffect(() => {
     refreshConfigs();
     loadErrors();
@@ -404,42 +904,52 @@ function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {configs.map((cfg) => (
-          <PanelSectionRow key={cfg.interface}>
-            <ToggleField
-              label={cfg.name}
-              description={cfg.interface}
-              checked={cfg.active}
-              disabled={!!loadingMap[cfg.name]}
-              onChange={(val) => handleToggle(cfg.name, val)}
-            />
-            <div style={{ marginTop: "4px" }}>
-              <ButtonItem
-                layout="below"
-                onClick={() =>
-                  showModal(
-                    <DeleteConfigModal
-                      configName={cfg.name}
-                      onSuccess={refreshConfigs}
-                    />
-                  )
-                }
-              >
-                Удалить конфиг
-              </ButtonItem>
-            </div>
-          </PanelSectionRow>
-        ))}
+        {configs.map((cfg) => {
+          const isSub = cfg.kind === "subscription";
+          const showStatus = cfg.active && status?.name === cfg.name;
+          return (
+            <PanelSectionRow key={cfg.interface}>
+              <ToggleField
+                label={cfg.name}
+                description={isSub ? "Подписка" : cfg.label}
+                checked={cfg.active}
+                disabled={!!loadingMap[cfg.name]}
+                onChange={(val) => handleToggle(cfg.name, val)}
+                bottomSeparator={isSub || showStatus ? "none" : "standard"}
+              />
+              {isSub && (
+                <SubscriptionServerButton
+                  cfg={cfg}
+                  onChanged={refreshConfigs}
+                  separator={showStatus ? "none" : "standard"}
+                />
+              )}
+              {showStatus && status && <StatusRows status={status} separator="standard" />}
+            </PanelSectionRow>
+          );
+        })}
         <PanelSectionRow>
           <ButtonItem
             layout="below"
             onClick={() =>
-              showModal(<ImportConfigModal onSuccess={refreshConfigs} />)
+              showModal(
+                <ImportConfigModal existingNames={configs.map((c) => c.name)} onSuccess={refreshConfigs} />,
+              )
             }
           >
             Импортировать конфиг
           </ButtonItem>
         </PanelSectionRow>
+        {configs.length > 0 && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => showModal(<DeleteConfigModal configs={configs} onSuccess={refreshConfigs} />)}
+            >
+              Удалить конфиг…
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       <PanelSection title="Диагностика">
@@ -470,104 +980,34 @@ function Content() {
             </div>
           </PanelSectionRow>
         ))}
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={repairLoading}
-            onClick={handleRepairSymlinks}
-          >
-            {repairLoading ? "Восстановление…" : "Восстановить симлинки"}
-          </ButtonItem>
-        </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Ошибки">
+      <PanelSection>
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => {
-              setShowErrors(!showErrors);
-              if (!showErrors) loadErrors();
-            }}
-          >
-            {showErrors
-              ? "Скрыть ошибки"
-              : `Просмотр ошибок${errors.length > 0 ? ` (${errors.length})` : ""}`}
-          </ButtonItem>
+          <LinkRow
+            label="Настройки"
+            onOpen={() =>
+              showModal(
+                <InfoModal title="Настройки">
+                  <SettingsTab />
+                </InfoModal>,
+              )
+            }
+          />
         </PanelSectionRow>
-
-        {showErrors && (
-          <>
-            {errors.length > 0 && (
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={handleClearErrors}>
-                  Очистить историю ошибок
-                </ButtonItem>
-              </PanelSectionRow>
-            )}
-
-            {errors.length === 0 ? (
-              <PanelSectionRow>
-                <div
-                  style={{
-                    padding: "10px",
-                    textAlign: "center",
-                    color: "#888",
-                    fontSize: "14px",
-                  }}
-                >
-                  Ошибок не обнаружено
-                </div>
-              </PanelSectionRow>
-            ) : (
-              errors
-                .slice()
-                .reverse()
-                .map((error) => (
-                  <PanelSectionRow key={`${error.timestamp}-${error.operation}`}>
-                    <div
-                      style={{
-                        padding: "12px",
-                        backgroundColor: "rgba(255, 0, 0, 0.1)",
-                        borderRadius: "4px",
-                        marginBottom: "8px",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <div style={{ marginBottom: "4px", fontWeight: "bold" }}>
-                        {formatTimestamp(error.timestamp)} - {error.operation}
-                      </div>
-                      <div style={{ marginBottom: "4px", color: "#FF6B6B" }}>
-                        <strong>Тип:</strong> {error.error_type}
-                      </div>
-                      <div style={{ marginBottom: "4px" }}>
-                        <strong>Сообщение:</strong> {error.message}
-                      </div>
-                      {Object.keys(error.details).length > 0 && (
-                        <details style={{ marginTop: "8px" }}>
-                          <summary style={{ cursor: "pointer", color: "#888" }}>
-                            Детали
-                          </summary>
-                          <pre
-                            style={{
-                              marginTop: "4px",
-                              padding: "8px",
-                              backgroundColor: "rgba(0, 0, 0, 0.3)",
-                              borderRadius: "4px",
-                              fontSize: "11px",
-                              overflow: "auto",
-                            }}
-                          >
-                            {JSON.stringify(error.details, null, 2)}
-                          </pre>
-                        </details>
-                      )}
-                    </div>
-                  </PanelSectionRow>
-                ))
-            )}
-          </>
-        )}
+        <PanelSectionRow>
+          <LinkRow
+            label="Ошибки"
+            description={errorCount > 0 ? `Ошибок: ${errorCount}` : "Нет"}
+            onOpen={() =>
+              showModal(
+                <InfoModal title="Ошибки">
+                  <ErrorsTab />
+                </InfoModal>,
+              )
+            }
+          />
+        </PanelSectionRow>
       </PanelSection>
     </>
   );

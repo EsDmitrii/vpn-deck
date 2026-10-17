@@ -2,7 +2,7 @@
 
 [Русский](README.ru.md)
 
-A Decky Loader plugin for managing AmneziaWG VPN connections on Steam Deck from gaming mode UI.
+A Decky Loader plugin for managing VPN connections (AmneziaWG and VLESS) on Steam Deck from gaming mode UI.
 
 ![Screenshot](assets/screenshot.jpeg)
 
@@ -14,21 +14,20 @@ This plugin was developed purely out of enthusiasm, in spare time. If you encoun
 
 ## 📋 Description
 
-**VPN Deck** is a Decky Loader plugin that lets you manage VPN via AmneziaWG directly from Steam Deck gaming mode:
+**VPN Deck** — VPN right from Steam Deck gaming mode:
 
-- Config import — add VPN from a `.conf` file through the plugin UI
-- Multiple configs — store and switch between multiple VPN connections
-- Enable/disable each config with a single toggle
-- Real-time connection status
-- Error history with the ability to clear it
+- Import: AmneziaWG `.conf`, `vpn://` and `vless://` links, sing-box JSON
+- One toggle per config, one config at a time
+- Status: exit IP, speed, handshake
+- Survives sleep and Wi-Fi changes, reconnects after reboot
 
-The plugin requires root access to work with `awg-quick` and network interfaces.
+Requires root.
 
 ### ⚠️ Important: Limitations
 
 **In version 2, the plugin does not manage the `awg0` interface.** Only configs added through the plugin are managed (interfaces named `vd-<name>`).
 
-Configs imported through the plugin are stored in `~/.local/share/vpn-deck/configs`; symlinks are created in `/etc/amnezia/amneziawg/`. AmneziaWG binaries are included in the plugin release — no separate installation required.
+Configs imported through the plugin are stored in `~/.local/share/vpn-deck/configs`; AWG configs get symlinks in `/etc/amnezia/amneziawg/`. AmneziaWG and sing-box binaries are included in the plugin release — no separate installation required.
 
 ## Changes between v1 and v2
 
@@ -44,29 +43,46 @@ If you were using v1 with `awg0`, after upgrading to v2 the plugin will no longe
 
 Install the plugin **only from official releases** on GitHub.
 
-> [!IMPORTANT]
-> The config must be in **AmneziaWG native format** (a WireGuard-like `.conf` file with `Jc`, `Jmin`, `Jmax`, etc. fields). In the AmneziaVPN app, make sure to select **"AmneziaWG native format"** when exporting — it is not the default.
-
 **Before removing the plugin or installing a new version, turn off VPN in the plugin itself** (set the toggle next to the active config to "off"). Otherwise, the update or removal may fail.
 
-1. Open [Releases](https://github.com/mrwaip/vpn-deck/releases) and download the latest release (`vpn-deck-v*.zip`).
-2. Copy the ZIP to your Steam Deck, open Decky Loader → plugin settings → "Install plugin" → specify the path to the file.
+**From URL (easiest):** Decky Loader → settings → "Developer" → "Install Plugin from URL" → paste
 
-**After installation:** open the plugin in gaming mode → "Import config" → select a `.conf` file (e.g., from the Downloads folder). After import, the config will appear in the list and can be toggled on/off.
+```
+https://github.com/mrwaip/vpn-deck/releases/latest/download/vpn-deck.zip
+```
+
+**From a file:** download `vpn-deck.zip` from [Releases](https://github.com/mrwaip/vpn-deck/releases), copy it to your Steam Deck, open Decky Loader → plugin settings → "Install plugin" → specify the path to the file.
+
+**After installation:** open the plugin in gaming mode → "Import config" → select a file (e.g., from the Downloads folder). After import, the config will appear in the list and can be toggled on/off.
+
+### Which file you need
+
+- AmneziaVPN: a `vpn://` link (save it as `.txt`) or an "AmneziaWG native format" export (`.conf`)
+- VLESS: a `vless://` link in a `.txt`
+- sing-box: a `.json` with one `tun`
 
 ### How to transfer a config to Steam Deck
 
-You need to transfer the `.conf` file to the Deck in order to select it in the plugin:
+You need to transfer the file to the Deck in order to select it in the plugin:
 
-- **LocalSend** — install the app on your phone/PC and on the Deck (from Discover in Desktop Mode). Send the `.conf` file to the Deck; it will land in Downloads.
+- **LocalSend** — install the app on your phone/PC and on the Deck (from Discover in Desktop Mode). Send the file to the Deck; it will land in Downloads. A link can be sent as text and saved as `.txt`.
 - **Desktop Mode + browser** — switch to Desktop Mode, open a browser, download the config (or save it from email/messenger) to the Downloads folder. In gaming mode, specify the path to this file in the plugin (e.g., `/home/deck/Downloads/name.conf`).
 
 ## Usage
 
-- **Import config** — "Import config" button, select a `.conf` file. Config name: up to 12 characters (letters, digits, `_`, `=`, `+`, `.`, `-`).
+- **Import config** — "Import config" button, select a file. The plugin shows what it is (AWG, VLESS REALITY…). Config name: up to 12 characters (letters, digits, `_`, `=`, `+`, `.`, `-`).
+- **MTU** — if the tunnel is up but nothing loads, re-import the config with "MTU 1280".
 - **Enable/disable** — toggle next to the config name.
 - **Delete config** — "Delete config" under the desired config (the interface will be stopped).
 - **Errors** — "Errors" section: view history and clear it with "Clear error history".
+
+## Security
+
+The plugin runs as root, so `PostUp`/`PreUp` commands from `vpn://` links are refused, and sing-box JSON may not open network ports or write files.
+
+## Development
+
+`just test` — unit tests, `just typecheck` — pyright and tsc, `just test-e2e` — e2e in Docker with the real binaries.
 
 ## Support & License
 
