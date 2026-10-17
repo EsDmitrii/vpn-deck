@@ -8,9 +8,11 @@ import {
   DropdownItem,
   Field,
   ModalRoot,
+  Navigation,
   PanelSection,
   PanelSectionRow,
   showModal,
+  SidebarNavigation,
   staticClasses,
   TextField,
   ToggleField,
@@ -20,6 +22,7 @@ import {
   definePlugin,
   FileSelectionType,
   openFilePicker,
+  routerHook,
   toaster,
 } from "@decky/api";
 import { useState, useEffect, useCallback } from "react";
@@ -501,8 +504,16 @@ function StatusRows({ status, separator }: { status: ConnectionStatus; separator
   );
 }
 
-function SettingsSection() {
+const SETTINGS_ROUTE = "/vpn-deck";
+
+function openSettingsPage() {
+  Navigation.Navigate(SETTINGS_ROUTE);
+  Navigation.CloseSideMenus();
+}
+
+function SettingsTab() {
   const [settings, setSettings] = useState<PluginSettings | null>(null);
+  const [repairing, setRepairing] = useState(false);
 
   useEffect(() => {
     getSettings().then(setSettings).catch((e) => console.error("Failed to load settings:", e));
@@ -517,26 +528,118 @@ function SettingsSection() {
     setSettings((prev) => (prev ? { ...prev, [key]: value } : prev));
   };
 
+  const repair = async () => {
+    setRepairing(true);
+    try {
+      const res = await repairSymlinks();
+      toaster.toast({ title: "Симлинки", body: `Восстановлено ${res.repaired} из ${res.total}` });
+    } catch (e) {
+      toaster.toast({ title: "Ошибка восстановления", body: String(e) });
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   if (!settings) return null;
   return (
-    <PanelSection title="Настройки">
-      <PanelSectionRow>
-        <ToggleField
-          label="Подключать после перезагрузки"
-          description="Включить конфиг, который был включён до выключения Deck"
-          checked={settings.restore_on_boot}
-          onChange={(v) => update("restore_on_boot", v)}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ToggleField
-          label="VLESS: только IPv4"
-          description={`DNS ${settings.vless_dns_server} через прокси. Выключите, если сервер умеет IPv6`}
-          checked={settings.vless_ipv4_only}
-          onChange={(v) => update("vless_ipv4_only", v)}
-        />
-      </PanelSectionRow>
-    </PanelSection>
+    <>
+      <ToggleField
+        label="Подключать после перезагрузки"
+        description="Включить конфиг, который был включён до выключения Deck"
+        checked={settings.restore_on_boot}
+        onChange={(v) => update("restore_on_boot", v)}
+      />
+      <ToggleField
+        label="VLESS: только IPv4"
+        description={`DNS ${settings.vless_dns_server} через прокси. Выключите, если сервер умеет IPv6`}
+        checked={settings.vless_ipv4_only}
+        onChange={(v) => update("vless_ipv4_only", v)}
+      />
+      <ButtonItem
+        layout="inline"
+        label="Восстановить симлинки AWG"
+        description="Если после обновления SteamOS конфиги AWG перестали включаться"
+        disabled={repairing}
+        onClick={repair}
+      >
+        {repairing ? "Восстановление…" : "Восстановить"}
+      </ButtonItem>
+    </>
+  );
+}
+
+function ErrorsTab() {
+  const [errors, setErrors] = useState<VPNError[] | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setErrors(await getErrors());
+    } catch (e) {
+      console.error("Failed to load errors:", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const clear = async () => {
+    await clearErrors();
+    setErrors([]);
+    toaster.toast({ title: "История ошибок очищена", body: "" });
+  };
+
+  if (errors === null) return null;
+  if (errors.length === 0) return <div style={{ ...TEXT, color: "#8b929a" }}>Ошибок нет</div>;
+  return (
+    <>
+      <ButtonItem layout="inline" label={`Ошибок: ${errors.length}`} onClick={clear}>
+        Очистить
+      </ButtonItem>
+      {errors
+        .slice()
+        .reverse()
+        .map((error) => (
+          <div
+            key={`${error.timestamp}-${error.operation}`}
+            style={{
+              padding: "12px",
+              marginTop: "8px",
+              backgroundColor: "rgba(255, 0, 0, 0.1)",
+              borderRadius: "4px",
+              fontSize: "13px",
+            }}
+          >
+            <div style={{ fontWeight: "bold" }}>
+              {formatTimestamp(error.timestamp)} · {error.operation} · {error.error_type}
+            </div>
+            <div style={{ marginTop: "4px", whiteSpace: "pre-wrap" }}>{error.message}</div>
+            {Object.keys(error.details).length > 0 && (
+              <pre style={{ marginTop: "8px", fontSize: "11px", whiteSpace: "pre-wrap", color: "#8b929a" }}>
+                {JSON.stringify(error.details, null, 2)}
+              </pre>
+            )}
+          </div>
+        ))}
+    </>
+  );
+}
+
+/** Full-screen page (route) opened from the panel. */
+function SettingsPage() {
+  return (
+    <div style={{ marginTop: "40px", height: "calc(100% - 40px)" }}>
+      <SidebarNavigation
+        title="VPN Deck"
+        showTitle
+        pages={[
+          { title: "Настройки", content: <SettingsTab />, route: `${SETTINGS_ROUTE}/settings` },
+          { title: "Ошибки", content: <ErrorsTab />, route: `${SETTINGS_ROUTE}/errors` },
+        ]}
+      />
+    </div>
   );
 }
 
@@ -699,11 +802,9 @@ function Content() {
   const [configs, setConfigs] = useState<ConfigInfo[]>([]);
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
-  const [errors, setErrors] = useState<VPNError[]>([]);
-  const [showErrors, setShowErrors] = useState<boolean>(false);
+  const [errorCount, setErrorCount] = useState(0);
   const [probes, setProbes] = useState<DiagnosticsProbe[] | null>(null);
   const [probesLoading, setProbesLoading] = useState<boolean>(false);
-  const [repairLoading, setRepairLoading] = useState<boolean>(false);
 
   const refreshConfigs = useCallback(async () => {
     try {
@@ -717,8 +818,7 @@ function Content() {
 
   const loadErrors = useCallback(async () => {
     try {
-      const errorList = await getErrors();
-      setErrors(errorList);
+      setErrorCount((await getErrors()).length);
     } catch (error) {
       console.error("Failed to load errors:", error);
     }
@@ -772,32 +872,6 @@ function Content() {
       toaster.toast({ title: "Ошибка диагностики", body: String(e) });
     } finally {
       setProbesLoading(false);
-    }
-  }, []);
-
-  const handleRepairSymlinks = useCallback(async () => {
-    setRepairLoading(true);
-    try {
-      const res = await repairSymlinks();
-      toaster.toast({
-        title: "Симлинки",
-        body: `Восстановлено ${res.repaired} из ${res.total}`,
-      });
-      await refreshConfigs();
-    } catch (e) {
-      toaster.toast({ title: "Ошибка восстановления", body: String(e) });
-    } finally {
-      setRepairLoading(false);
-    }
-  }, [refreshConfigs]);
-
-  const handleClearErrors = useCallback(async () => {
-    try {
-      await clearErrors();
-      setErrors([]);
-      toaster.toast({ title: "История ошибок очищена", body: "" });
-    } catch (error) {
-      toaster.toast({ title: "Ошибка очистки", body: String(error) });
     }
   }, []);
 
@@ -872,8 +946,6 @@ function Content() {
         )}
       </PanelSection>
 
-      <SettingsSection />
-
       <PanelSection title="Диагностика">
         <PanelSectionRow>
           <ButtonItem
@@ -902,104 +974,22 @@ function Content() {
             </div>
           </PanelSectionRow>
         ))}
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            disabled={repairLoading}
-            onClick={handleRepairSymlinks}
-          >
-            {repairLoading ? "Восстановление…" : "Восстановить симлинки"}
-          </ButtonItem>
-        </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Ошибки">
+      <PanelSection>
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => {
-              setShowErrors(!showErrors);
-              if (!showErrors) loadErrors();
-            }}
+          <Field
+            label="Настройки и ошибки"
+            description={errorCount > 0 ? `Ошибок: ${errorCount}` : undefined}
+            focusable
+            highlightOnFocus
+            onActivate={openSettingsPage}
+            onClick={openSettingsPage}
+            bottomSeparator="none"
           >
-            {showErrors
-              ? "Скрыть ошибки"
-              : `Просмотр ошибок${errors.length > 0 ? ` (${errors.length})` : ""}`}
-          </ButtonItem>
+            <span style={{ fontSize: "20px", color: "#8b929a" }}>›</span>
+          </Field>
         </PanelSectionRow>
-
-        {showErrors && (
-          <>
-            {errors.length > 0 && (
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={handleClearErrors}>
-                  Очистить историю ошибок
-                </ButtonItem>
-              </PanelSectionRow>
-            )}
-
-            {errors.length === 0 ? (
-              <PanelSectionRow>
-                <div
-                  style={{
-                    padding: "10px",
-                    textAlign: "center",
-                    color: "#888",
-                    fontSize: "14px",
-                  }}
-                >
-                  Ошибок не обнаружено
-                </div>
-              </PanelSectionRow>
-            ) : (
-              errors
-                .slice()
-                .reverse()
-                .map((error) => (
-                  <PanelSectionRow key={`${error.timestamp}-${error.operation}`}>
-                    <div
-                      style={{
-                        padding: "12px",
-                        backgroundColor: "rgba(255, 0, 0, 0.1)",
-                        borderRadius: "4px",
-                        marginBottom: "8px",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <div style={{ marginBottom: "4px", fontWeight: "bold" }}>
-                        {formatTimestamp(error.timestamp)} - {error.operation}
-                      </div>
-                      <div style={{ marginBottom: "4px", color: "#FF6B6B" }}>
-                        <strong>Тип:</strong> {error.error_type}
-                      </div>
-                      <div style={{ marginBottom: "4px" }}>
-                        <strong>Сообщение:</strong> {error.message}
-                      </div>
-                      {Object.keys(error.details).length > 0 && (
-                        <details style={{ marginTop: "8px" }}>
-                          <summary style={{ cursor: "pointer", color: "#888" }}>
-                            Детали
-                          </summary>
-                          <pre
-                            style={{
-                              marginTop: "4px",
-                              padding: "8px",
-                              backgroundColor: "rgba(0, 0, 0, 0.3)",
-                              borderRadius: "4px",
-                              fontSize: "11px",
-                              overflow: "auto",
-                            }}
-                          >
-                            {JSON.stringify(error.details, null, 2)}
-                          </pre>
-                        </details>
-                      )}
-                    </div>
-                  </PanelSectionRow>
-                ))
-            )}
-          </>
-        )}
       </PanelSection>
     </>
   );
@@ -1007,6 +997,7 @@ function Content() {
 
 export default definePlugin(() => {
   console.log("VPN Deck plugin initializing");
+  routerHook.addRoute(SETTINGS_ROUTE, SettingsPage, { exact: false });
 
   return {
     name: "VPN Deck",
@@ -1015,6 +1006,7 @@ export default definePlugin(() => {
     icon: <FaNetworkWired />,
     onDismount() {
       console.log("VPN Deck plugin unloading");
+      routerHook.removeRoute(SETTINGS_ROUTE);
     },
   };
 });
