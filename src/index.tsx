@@ -386,14 +386,24 @@ function ImportConfigModal({
                 description="до 12 символов: a-z, 0-9, _ = + . -"
               />
               {(inspection.servers?.length ?? 0) > 0 && (
-                <DropdownItem
-                  label="Сервер"
+                <ButtonItem
+                  layout="below"
                   description="Потом можно сменить в списке конфигов"
-                  rgOptions={(inspection.servers ?? []).map((s) => ({ data: s, label: s }))}
-                  selectedOption={server}
-                  onChange={(opt) => setServer(opt.data)}
-                  bottomSeparator="none"
-                />
+                  onClick={() =>
+                    showModal(
+                      <ServerPickerModal
+                        load={async () => inspection.servers ?? []}
+                        current={server}
+                        onPick={async (s) => {
+                          setServer(s);
+                          return true;
+                        }}
+                      />,
+                    )
+                  }
+                >
+                  Сервер: {server ?? "—"}
+                </ButtonItem>
               )}
               {inspection.mtu_warning && (
                 <ToggleField
@@ -542,40 +552,89 @@ function DeleteConfigModal({
   );
 }
 
-/** Server picker under a subscription; the list is fetched when opened. */
-function SubscriptionServerPicker({ cfg, onChanged }: { cfg: ConfigInfo; onChanged: () => void }) {
-  const [servers, setServers] = useState<string[]>(cfg.server ? [cfg.server] : []);
+/** Full-size list of subscription servers; picking one applies it and closes. */
+function ServerPickerModal({
+  load,
+  current,
+  onPick,
+  closeModal,
+}: {
+  load: () => Promise<string[]>;
+  current: string | null;
+  onPick: (server: string) => Promise<boolean>;
+  closeModal?: () => void;
+}) {
+  const [servers, setServers] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const loadThenShow = async (showMenu: () => void) => {
-    const res = await getSubscriptionServers(cfg.name);
-    if (res.success && res.servers) setServers(res.servers);
-    else toaster.toast({ title: "Подписка", body: res.error ?? "Не удалось загрузить серверы" });
-    showMenu();
-  };
+  useEffect(() => {
+    load()
+      .then(setServers)
+      .catch((e) => setError(String(e)));
+  }, []);
 
   const pick = async (server: string) => {
-    if (server === cfg.server) return;
+    if (server === current) {
+      closeModal?.();
+      return;
+    }
     setBusy(true);
     try {
-      const res = await setSubscriptionServer(cfg.name, server);
-      toaster.toast(res.success ? { title: "Сервер сменён", body: server } : { title: "Ошибка", body: res.error ?? "" });
-      onChanged();
+      if (await onPick(server)) closeModal?.();
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <DropdownItem
-      label="Сервер"
-      rgOptions={servers.map((s) => ({ data: s, label: s }))}
-      selectedOption={cfg.server}
-      disabled={busy}
-      onMenuWillOpen={loadThenShow}
-      onChange={(opt) => pick(opt.data)}
-      bottomSeparator="none"
-    />
+    <ModalRoot onCancel={closeModal} closeModal={closeModal}>
+      <DialogHeader>Сервер подписки</DialogHeader>
+      <DialogBody>
+        {servers === null && !error && <div style={TEXT}>Загрузка списка серверов…</div>}
+        {error && <div style={{ ...TEXT, color: COLOR_ERROR }}>{error}</div>}
+        {servers && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+            {servers.map((s) => (
+              <DialogButton
+                key={s}
+                disabled={busy}
+                onClick={() => pick(s)}
+                style={{ textAlign: "left", fontWeight: s === current ? "bold" : undefined }}
+              >
+                {s === current ? `✓ ${s}` : s}
+              </DialogButton>
+            ))}
+          </div>
+        )}
+      </DialogBody>
+      <DialogFooter>
+        <DialogButton onClick={closeModal}>Закрыть</DialogButton>
+      </DialogFooter>
+    </ModalRoot>
+  );
+}
+
+/** "Server: X" row under a subscription; opens ServerPickerModal. */
+function SubscriptionServerButton({ cfg, onChanged }: { cfg: ConfigInfo; onChanged: () => void }) {
+  const load = async () => {
+    const res = await getSubscriptionServers(cfg.name);
+    if (!res.success || !res.servers) throw new Error(res.error ?? "Не удалось загрузить серверы");
+    return res.servers;
+  };
+  const pick = async (server: string) => {
+    const res = await setSubscriptionServer(cfg.name, server);
+    toaster.toast(res.success ? { title: "Сервер сменён", body: server } : { title: "Ошибка", body: res.error ?? "" });
+    onChanged();
+    return res.success;
+  };
+  return (
+    <ButtonItem
+      layout="below"
+      onClick={() => showModal(<ServerPickerModal load={load} current={cfg.server} onPick={pick} />)}
+    >
+      Сервер: {cfg.server ?? "—"}
+    </ButtonItem>
   );
 }
 
@@ -717,7 +776,7 @@ function Content() {
               disabled={!!loadingMap[cfg.name]}
               onChange={(val) => handleToggle(cfg.name, val)}
             />
-            {cfg.kind === "subscription" && <SubscriptionServerPicker cfg={cfg} onChanged={refreshConfigs} />}
+            {cfg.kind === "subscription" && <SubscriptionServerButton cfg={cfg} onChanged={refreshConfigs} />}
             {cfg.active && status?.name === cfg.name && <StatusRows status={status} />}
           </PanelSectionRow>
         ))}
